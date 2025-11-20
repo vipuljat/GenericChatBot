@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.log
+*.sqlite3
+*.db
+.env
+venv/
+myvenv/
+.env.*
+.DS_Store
+.idea/
+.vscode/
+*.bak
+*.swp
+uploaded_chatbots/
+# VS Code
+.vscode/
+# Windows
+Thumbs.db
+Desktop.ini
+# Mac
+.DS_Store
+# Jupyter
+.ipynb_checkpoints/
+# Test
+*.cover
+coverage.xml
+*.pytest_cache/
+# Others
+*.pkl
+*.h5
+*.csv
+*.tsv
+*.xls
+*.xlsx
+*.docx
+*.pptx
+*.pdf
+*.tmp
+*.log
+*.out
+*.bak
+*.swp
