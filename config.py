@@ -1,14 +1,39 @@
 import os
 from dotenv import load_dotenv
 
-env = os.environ
 load_dotenv()
 
-POSTGRES_USER = env.get('POSTGRES_USER', 'root')
-POSTGRES_PASSWORD = env.get('POSTGRES_PASSWORD', 'root')
-POSTGRES_HOST = env.get('POSTGRES_HOST', 'localhost')
-POSTGRES_PORT = env.get('POSTGRES_PORT', '5432')
-POSTGRES_DB = env.get('POSTGRES_DB', 'chatbot_db')
+# Database Configuration - Use DATABASE_URL directly
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@localhost:5432/GenericChatbotDB")
 
-GEMINI_API_KEY=env.get("GEMINI_API_KEY","AIzaSyDvrU8JwghS-KvRNlJEH0hbSVosy77q4q8")
-GEMINI_MODEL=env.get("GEMINI_MODEL","models/gemini-2.5-flash")
+# Google Gemini AI Configuration
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "models/gemini-2.5-flash")
+
+# Microsoft Azure AD SSO Configuration
+MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID")
+MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID")
+MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET")
+MICROSOFT_REDIRECT_URI = os.getenv("MICROSOFT_REDIRECT_URI")
+MICROSOFT_AUTHORITY = os.getenv("MICROSOFT_AUTHORITY")
+
+# JWT Configuration
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+JWT_EXPIRATION_MINUTES = int(os.getenv("JWT_EXPIRATION_MINUTES", "1440"))
+
+# OpenAI Configuration for Embeddings
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+
+# Qdrant Configuration
+QDRANT_URL = os.getenv("QDRANT_URL", "localhost")
+QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", None)
+QDRANT_COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_NAME", "chatbot_documents")
+QDRANT_STORAGE_PATH = os.getenv("QDRANT_STORAGE_PATH", "./qdrant_storage")  # Local file storage
+
+# Document Processing Configuration
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploaded_chatbots")

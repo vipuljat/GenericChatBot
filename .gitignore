@@ -19,6 +19,7 @@ myvenv/
 *.bak
 *.swp
 uploaded_chatbots/
+qdrant_storage/
 # VS Code
 .vscode/
 # Windows
