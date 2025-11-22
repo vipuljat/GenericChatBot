@@ -73,7 +73,7 @@ async def auth_callback(code: str, db: Session = Depends(get_db)):
     }
     
     # Redirect to frontend callback page with token and user data
-    frontend_callback_url = f"http://localhost:5173/auth/callback?token={jwt_token}&user={urllib.parse.quote(json.dumps(user_data))}"
+    frontend_callback_url = f"http://localhost:3000/auth/callback?token={jwt_token}&user={urllib.parse.quote(json.dumps(user_data))}"
     return RedirectResponse(url=frontend_callback_url)
 
 @router.get("/logout")

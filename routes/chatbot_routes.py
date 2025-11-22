@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
+import config
 from sqlalchemy.orm import Session
 from core.database import get_db
 from services.chatbot_service import create_chatbot_with_documents
@@ -6,7 +7,7 @@ from services.document_service import render_quiz_questions
 from services.rag_service import get_rag_service
 from models.chatbot import Chatbot
 from pydantic import BaseModel
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Union
 
 router = APIRouter()
 
@@ -26,7 +27,7 @@ def create_chatbot_route(
     chatbot_name: str = Form(...),
     description: str = Form(...),
     instructions: str = Form(...),
-    conversation_starters: Optional[List[str]] = Form(None),
+    conversation_starters: Union[str, List[str], None] = Form(default=None),
     is_quiz_mode: bool = Form(False),
     is_active: bool = Form(True),
     recommended_model: Optional[str] = Form(None),
@@ -38,6 +39,13 @@ def create_chatbot_route(
     Create a new chatbot with documents.
     Documents will be automatically processed and embeddings stored in Qdrant.
     """
+    # Handle conversation_starters - normalize to list or None
+    if conversation_starters is not None:
+        if isinstance(conversation_starters, str):
+            conversation_starters = [conversation_starters]
+        elif not isinstance(conversation_starters, list):
+            conversation_starters = None
+    
     chatbot_id = create_chatbot_with_documents(
         db=db,
         chatbot_name=chatbot_name,
@@ -75,7 +83,7 @@ def chat_with_chatbot(
     if not chatbot:
         raise HTTPException(status_code=404, detail=f"Chatbot {chatbot_id} not found")
     
-    if not chatbot.is_active:
+    if not bool(getattr(chatbot, 'is_active', False)):
         raise HTTPException(status_code=400, detail="Chatbot is not active")
     
     # Get RAG service
@@ -85,9 +93,9 @@ def chat_with_chatbot(
     result = rag_service.generate_response(
         query=request.query,
         chatbot_id=chatbot_id,
-        chatbot_instructions=chatbot.instructions,
+        chatbot_instructions=str(getattr(chatbot, 'instructions', '') or ''),
         conversation_history=request.conversation_history,
-        model_name=chatbot.recommended_model or "gemini-2.0-flash-exp"
+        model_name=str(getattr(chatbot, 'recommended_model', '') or '') or config.GEMINI_MODEL
     )
     
     return ChatResponse(**result)

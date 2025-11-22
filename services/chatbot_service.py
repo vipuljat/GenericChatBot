@@ -78,10 +78,10 @@ def create_chatbot_with_documents(
     chatbot_name: str,
     description: str,
     instructions: str,
-    conversation_starters: list,
+    conversation_starters: Optional[list],
     is_quiz_mode: bool,
     is_active: bool,
-    recommended_model: str,
+    recommended_model: Optional[str],
     file: UploadFile,
     quiz_file: Optional[UploadFile]
 ) -> int:

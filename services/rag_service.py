@@ -80,7 +80,8 @@ class RAGService:
         chatbot_id: int,
         chatbot_instructions: Optional[str] = None,
         conversation_history: Optional[List[Dict[str, str]]] = None,
-        model_name: str = "gemini-2.0-flash-exp"
+        model_name: Optional[str] = None,
+        max_retries: int = 3
     ) -> Dict:
         """
         Generate a response using RAG
@@ -124,19 +125,21 @@ User Question: {query}
 
 Please provide a clear, accurate answer based ONLY on the information in the context above. If the context doesn't contain enough information to answer the question, say so clearly. Cite which document(s) you used."""
             
-            # Generate response using Gemini
-            logger.info(f"Generating response with {model_name}")
-            model = genai.GenerativeModel(model_name)
-            
-            # Include conversation history if provided
-            if conversation_history:
-                chat = model.start_chat(history=[
-                    {"role": msg["role"], "parts": [msg["content"]]}
-                    for msg in conversation_history
-                ])
-                response = chat.send_message(prompt)
-            else:
-                response = model.generate_content(prompt)
+            # Resolve model name (prefer explicit param, then config)
+            resolved_model = model_name or config.GEMINI_MODEL
+            if resolved_model.endswith("-exp"):
+                logger.warning(
+                    "Experimental model requested; falling back to configured stable model"
+                )
+                resolved_model = config.GEMINI_MODEL
+            logger.info(f"Generating response with {resolved_model}")
+
+            response_obj = self._generate_with_retry(
+                prompt=prompt,
+                conversation_history=conversation_history,
+                initial_model=resolved_model,
+                max_retries=max_retries
+            )
             
             # Extract source documents
             sources = [
@@ -150,7 +153,7 @@ Please provide a clear, accurate answer based ONLY on the information in the con
             
             logger.info("Response generated successfully")
             return {
-                "response": response.text,
+                "response": response_obj.text,
                 "sources": sources,
                 "context_used": True,
                 "num_chunks_used": len(search_results)
@@ -166,11 +169,53 @@ Please provide a clear, accurate answer based ONLY on the information in the con
             }
 
 
+    # Helper methods inside class
+    def _attempt_model(self, model_name_local: str, prompt: str, conversation_history: Optional[List[Dict[str, str]]]):
+        m = genai.GenerativeModel(model_name_local)
+        if conversation_history:
+            chat = m.start_chat(history=[
+                {"role": msg["role"], "parts": [msg["content"]]}
+                for msg in conversation_history
+            ])
+            return chat.send_message(prompt)
+        return m.generate_content(prompt)
+
+    def _generate_with_retry(
+        self,
+        prompt: str,
+        conversation_history: Optional[List[Dict[str, str]]],
+        initial_model: str,
+        max_retries: int
+    ):
+        resolved_model = initial_model
+        backoff = 2
+        last_error = None
+        import time
+        for attempt in range(1, max_retries + 1):
+            try:
+                return self._attempt_model(resolved_model, prompt, conversation_history)
+            except Exception as e:
+                msg = str(e)
+                last_error = e
+                rate_limited = ("429" in msg) or ("quota" in msg.lower()) or ("rate" in msg.lower())
+                if rate_limited and attempt < max_retries:
+                    logger.warning(
+                        f"Rate limit/quota issue (attempt {attempt}); sleeping {backoff}s then retrying."
+                    )
+                    time.sleep(backoff)
+                    backoff *= 2
+                    if attempt == 1 and resolved_model != "gemini-1.5-flash":
+                        logger.info("Switching fallback model to gemini-1.5-flash due to rate limit.")
+                        resolved_model = "gemini-1.5-flash"
+                    continue
+                logger.error(f"Gemini generation failed: {msg}")
+                break
+        raise last_error or RuntimeError("Failed after retries")
+
 # Singleton instance
 _rag_service = None
 
 def get_rag_service() -> RAGService:
-    """Get or create RAG service instance"""
     global _rag_service
     if _rag_service is None:
         _rag_service = RAGService()
