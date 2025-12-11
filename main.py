@@ -1,9 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from core.database import Base, engine  
+from stateful_services.database import Base, engine  
 from routes.chatbot_routes import router as chatbot_router
 from routes.auth_routes import router as auth_router
 import logging
+from stateful_services.db_schema import *  # Ensure all models are imported
 
 # Configure logging
 logging.basicConfig(
@@ -28,9 +29,13 @@ app.add_middleware(
 
 @app.on_event("startup")
 def on_startup():
-    Base.metadata.create_all(bind=engine)
-    logging.info("Database tables created")
+    try:
+        Base.metadata.create_all(bind=engine)
+        logging.info("Database tables created")
+    except Exception as e:
+        logging.error(f"Error creating tables: {e}")
     logging.info("Application started successfully")
+
 
 @app.get("/")
 def read_root():

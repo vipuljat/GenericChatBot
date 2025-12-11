@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse, JSONResponse
 from sqlalchemy.orm import Session
-from core.database import get_db
+from stateful_services.database import get_db
 from services.auth_service import MicrosoftAuthService
 from models.user import User
 from datetime import datetime, timezone

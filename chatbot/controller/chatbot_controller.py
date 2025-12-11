@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-from core.database import get_db
+from stateful_services.database import get_db
 from chatbot.schema.request import ChatbotCreate
 from chatbot.services.chabot_services import create_chatbot_with_documents
 from fastapi import UploadFile, File, Form

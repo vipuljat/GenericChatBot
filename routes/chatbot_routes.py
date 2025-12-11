@@ -1,7 +1,7 @@
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 import config
 from sqlalchemy.orm import Session
-from core.database import get_db
+from stateful_services.database import get_db
 from services.chatbot_service import create_chatbot_with_documents
 from services.document_service import render_quiz_questions
 from services.rag_service import get_rag_service
