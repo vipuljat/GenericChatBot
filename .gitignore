@@ -21,6 +21,7 @@ myvenv/
 uploaded_chatbots/
 qdrant_storage/
 # VS Code
+*hr
 .vscode/
 # Windows
 Thumbs.db

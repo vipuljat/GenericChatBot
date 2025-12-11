@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Integer, String, Text, Boolean, ARRAY
-from core.database import Base
+from stateful_services.database  import Base
 
 class Chatbot(Base):
     __tablename__ = "chatbots_details"

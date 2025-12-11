@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Integer, String, DateTime, Boolean
-from core.database import Base
+from stateful_services.database  import Base
 from datetime import datetime
 
 class User(Base):
