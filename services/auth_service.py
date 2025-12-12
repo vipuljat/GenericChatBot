@@ -37,13 +37,18 @@ class MicrosoftAuthService:
                 redirect_uri=self.redirect_uri
             )
             
-            if "access_token" in result:
+            # Safely check for access_token
+            if result and "access_token" in result:
                 return result
             else:
-                print(f"Error acquiring token: {result.get('error_description')}")
+                error_desc = result.get("error_description", "Unknown error") if result else "No result"
+                print(f"Error acquiring token: {error_desc}")
+                print(f"Full result: {result}")
                 return None
         except Exception as e:
             print(f"Exception in get_token_from_code: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return None
     
     async def get_user_info(self, access_token: str) -> Optional[Dict]:
@@ -56,27 +61,53 @@ class MicrosoftAuthService:
                 )
                 
                 if response.status_code == 200:
-                    return response.json()
+                    # Parse JSON safely
+                    try:
+                        user_data = response.json()
+                        print(f"Successfully fetched user info. Keys: {list(user_data.keys())}")
+                        
+                        # Return the raw dictionary without any processing
+                        # Do NOT access any keys here with brackets
+                        return dict(user_data)
+                    except Exception as json_error:
+                        print(f"Error parsing JSON: {str(json_error)}")
+                        print(f"Response text: {response.text}")
+                        return None
                 else:
                     print(f"Error fetching user info: {response.status_code}")
+                    print(f"Response: {response.text}")
                     return None
         except Exception as e:
             print(f"Exception in get_user_info: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def create_jwt_token(self, user_data: Dict) -> str:
-        """Create JWT token for session management"""
-        expiration = datetime.utcnow() + timedelta(minutes=config.JWT_EXPIRATION_MINUTES)
-        
-        payload = {
-            "sub": user_data["id"],
-            "email": user_data["mail"] or user_data.get("userPrincipalName"),
-            "name": user_data["displayName"],
-            "exp": expiration
-        }
-        
-        token = jwt.encode(payload, config.JWT_SECRET_KEY, algorithm=config.JWT_ALGORITHM)
-        return token
+        """Create JWT token from user data"""
+        try:
+            expiration = datetime.utcnow() + timedelta(minutes=config.JWT_EXPIRATION_MINUTES)
+
+            # Safely extract all fields - handle both formats
+            user_id = user_data.get("id") or user_data.get("sub", "")
+            email = user_data.get("email") or user_data.get("mail") or user_data.get("userPrincipalName", "")
+            name = user_data.get("name") or user_data.get("displayName", "")
+
+            payload = {
+                "sub": user_id,
+                "email": email,
+                "name": name,
+                "exp": expiration
+            }
+
+            token = jwt.encode(payload, config.JWT_SECRET_KEY, algorithm=config.JWT_ALGORITHM)
+            return token
+        except Exception as e:
+            print(f"Error creating JWT token: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise
+
     
     def verify_jwt_token(self, token: str) -> Optional[Dict]:
         """Verify and decode JWT token"""
@@ -85,4 +116,7 @@ class MicrosoftAuthService:
             return payload
         except JWTError as e:
             print(f"JWT Error: {str(e)}")
+            return None
+        except Exception as e:
+            print(f"Unexpected error verifying JWT: {str(e)}")
             return None
