@@ -1,10 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from stateful_services.database import Base, engine  
+import logging
+import uvicorn  # Add this import
 from routes.chatbot_routes import router as chatbot_router
 from routes.auth_routes import router as auth_router
-import logging
-from stateful_services.db_schema import *  # Ensure all models are imported
+from stateful_services.database import check_db_health
 
 # Configure logging
 logging.basicConfig(
@@ -29,13 +29,11 @@ app.add_middleware(
 
 @app.on_event("startup")
 def on_startup():
-    try:
-        Base.metadata.create_all(bind=engine)
-        logging.info("Database tables created")
-    except Exception as e:
-        logging.error(f"Error creating tables: {e}")
-    logging.info("Application started successfully")
-
+    logging.info("Starting application...")
+    if not check_db_health():
+        logging.error("Database connection failed! Application startup aborted.")
+    else:
+        logging.info("Application started successfully and database is healthy.")
 
 @app.get("/")
 def read_root():
@@ -49,6 +47,11 @@ def read_root():
 def health_check():
     return {"status": "healthy"}
 
+
 app.include_router(chatbot_router, prefix="/chatbot", tags=["Chatbot"])
 app.include_router(auth_router, prefix="/auth", tags=["Authentication"])
 
+
+if __name__ == "__main__":
+    # Runs the FastAPI app with uvicorn when executing: python3 main.py
+    uvicorn.run("main:app",host="0.0.0.0",port=8000,reload=True, )
