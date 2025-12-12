@@ -14,6 +14,7 @@ class Employee(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     employee_id = Column(String, nullable=False, unique=True)
     employee_name = Column(String, nullable=False)
+    employee_email = Column(String, nullable=True, unique=True)
     employee_role = Column(String, nullable=False)
     department = Column(String, nullable=True)
     meta_data = Column(JSONB, nullable=True)  # changed to JSONB
