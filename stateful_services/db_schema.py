@@ -32,6 +32,7 @@ class Chatbot(Base):
     pdf_names = Column(JSONB, nullable=True)
     status = Column(String, nullable=False, default="draft")
     generated_by = Column(UUID(as_uuid=True), ForeignKey("employees.id"), nullable=True)
+    mode= Column(String, nullable=True, default="general")
     meta_data = Column(JSONB, nullable=True)  
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

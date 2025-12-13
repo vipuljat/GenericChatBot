@@ -376,66 +376,6 @@ def search_similar_chunks(
         )
 
 
-# def get_chatbot_context(
-#     chatbot_name: str,
-#     query: str, 
-#     max_context_length: int = 3000,
-#     document_type: Optional[str] = None
-# ) -> str:
-#     """
-#     Get relevant context for a query by searching similar chunks.
-    
-#     Args:
-#         chatbot_name: Name of the chatbot
-#         query: User query
-#         max_context_length: Maximum total characters of context
-#         document_type: Optional filter by document type
-        
-#     Returns:
-#         Concatenated context string from relevant chunks
-#     """
-#     try:
-#         chunks = search_similar_chunks(
-#             chatbot_name, 
-#             query, 
-#             top_k=10,
-#             document_type=document_type
-#         )
-        
-#         if not chunks:
-#             return ""
-        
-#         # Build context from most relevant chunks
-#         context_parts = []
-#         total_length = 0
-        
-#         for chunk in chunks:
-#             text = chunk['text']
-#             source = chunk['source_file']
-#             doc_type = chunk.get('document_type', 'unknown')
-            
-#             # Add source reference and text
-#             chunk_text = f"[Source: {source} ({doc_type})]\n{text}\n"
-#             chunk_length = len(chunk_text)
-            
-#             if total_length + chunk_length > max_context_length:
-#                 break
-            
-#             context_parts.append(chunk_text)
-#             total_length += chunk_length
-        
-#         context = "\n---\n".join(context_parts)
-        
-#         log.info(
-#             f"Built context of {total_length} chars from "
-#             f"{len(context_parts)} chunks for chatbot '{chatbot_name}'"
-#         )
-        
-#         return context
-        
-#     except Exception as e:
-#         log.error(f"Error getting chatbot context: {e}")
-#         return ""
 def get_chatbot_context(
     chatbot_name: str,
     query: str, 
