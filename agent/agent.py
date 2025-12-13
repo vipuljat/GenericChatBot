@@ -9,7 +9,7 @@ import config
 
 # Correct configuration Block
 genai.configure(api_key=config.GEMINI_API_KEY)
-print(genai.list_models())
+
 
 # Correct flash model init
 model = genai.GenerativeModel(config.GEMINI_MODEL)

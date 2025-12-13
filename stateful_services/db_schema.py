@@ -29,10 +29,10 @@ class Chatbot(Base):
     chatbot_name = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     instruction = Column(Text, nullable=True)
-    pdf_name = Column(String, nullable=True)
+    pdf_names = Column(JSONB, nullable=True)
     status = Column(String, nullable=False, default="draft")
-    generated_by = Column(String, nullable=True)
-    meta_data = Column(JSONB, nullable=True)  # changed to JSONB
+    generated_by = Column(UUID(as_uuid=True), ForeignKey("employees.id"), nullable=True)
+    meta_data = Column(JSONB, nullable=True)  
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

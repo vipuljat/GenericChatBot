@@ -1,89 +1,108 @@
+"""FastAPI application entry point."""
+
+from contextlib import asynccontextmanager
+
+import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import logging
-import uvicorn
-from routes.chatbot_routes import router as chatbot_router
-from routes.auth_routes import router as auth_router
-from stateful_services.database import check_db_health
-from services.qdrant_service import qdrant_healthcheck
 from fastapi.openapi.docs import get_redoc_html
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+from routes.chatbot_routes import router as chatbot_router
+from routes.chatbot import router as chatbot
+from routes.auth_routes import router as auth_router
+from stateful_services.database import check_all_health
+from utils.logging import log
 
-# --- Create app once ---
-app = FastAPI(
-    title="Generic ChatBot API",
-    description="API for creating custom chatbots with document embeddings",
-    version="1.0.0",
-    docs_url='/api/v1/docs',
-    redoc_url=None,
-    openapi_url='/api/v1/openapi.json'
-)
 
-# Configure CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # In prod, restrict to your frontend
-    allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods including OPTIONS
-    allow_headers=["*"],  # Allow all headers
-)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan handler for startup and shutdown events."""
+    # Startup
+    log.info("Starting application...")
+    
+    health_status = check_all_health()
+    
+    for service, is_healthy in health_status.items():
+        if not is_healthy:
+            log.warning(f"⚠️ {service.capitalize()} health check failed!")
+        else:
+            log.info(f"{service.capitalize()} is healthy")
+    
+    log.info("Application startup complete")
+    
+    yield
+    
+    # Shutdown
+    log.info("Shutting down application...")
 
-# --- Startup event ---
-@app.on_event("startup")
-def on_startup():
-    logger.info("Starting application...")
 
-    # Database health check
-    if not check_db_health():
-        logger.warning("⚠️ Database connection failed! Some features may not work.")
-    else:
-        logger.info("Database is healthy.")
-
-    # # Qdrant health check
-    # if not qdrant_healthcheck():
-    #     logger.warning("⚠️ Qdrant health check failed! Some features may not work.")
-    # else:
-    #     logger.info("Qdrant is healthy.")
-
-    # logger.info("Application startup complete.")
-
-# --- Routes ---
-@app.get("/")
-def read_root():
-    return {
-        "message": "Generic ChatBot API",
-        "version": "1.0.0",
-        "status": "running"
-    }
-
-@app.get("/api/v1/redoc", include_in_schema=False)
-async def redoc_html():
-    return get_redoc_html(
-        openapi_url=app.openapi_url,
-        title=app.title + " - ReDoc",
-        redoc_js_url="https://cdn.jsdelivr.net/npm/redoc@2/bundles/redoc.standalone.js",
+def create_app() -> FastAPI:
+    """Application factory for creating FastAPI instance."""
+    application = FastAPI(
+        title="Generic ChatBot API",
+        description="API for creating custom chatbots with document embeddings",
+        version="1.0.0",
+        docs_url="/api/v1/docs",
+        redoc_url=None,
+        openapi_url="/api/v1/openapi.json",
+        lifespan=lifespan
     )
+    
+    # Configure CORS
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # TODO: Restrict to specific origins in production
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    
+    # Register routes
+    application.include_router(chatbot_router, prefix="/chatbot", tags=["Chatbot"])
+    application.include_router(auth_router, prefix="/auth", tags=["Authentication"])
+    application.include_router(chatbot, prefix="/chatbot/v2", tags=["Chatobot v2"])
+    
+    @application.get("/")
+    def read_root():
+        """Root endpoint returning API information."""
+        return {
+            "message": "Generic ChatBot API",
+            "version": "1.0.0",
+            "status": "running"
+        }
+    
+    @application.get("/health")
+    def health_check():
+        """Health check endpoint for monitoring."""
+        health = check_all_health()
+        all_healthy = all(health.values())
+        
+        return {
+            "status": "healthy" if all_healthy else "degraded",
+            "services": health
+        }
+    
+    @application.get("/api/v1/redoc", include_in_schema=False)
+    async def redoc_html():
+        """ReDoc documentation endpoint."""
+        return get_redoc_html(
+            openapi_url=application.openapi_url,
+            title=application.title + " - ReDoc",
+            redoc_js_url="https://cdn.jsdelivr.net/npm/redoc@2/bundles/redoc.standalone.js",
+        )
+    
+    return application
 
-@app.get("/health")
-def health_check():
-    """Check health of both database and Qdrant"""
-    db_status = "healthy" if check_db_health() else "unhealthy"
-    qdrant_status = "healthy" if qdrant_healthcheck() else "unhealthy"
-    return {
-        "database": db_status,
-        "qdrant": qdrant_status
-    }
 
-# Include routers
-app.include_router(chatbot_router, prefix="/chatbot", tags=["Chatbot"])
-app.include_router(auth_router, prefix="/auth", tags=["Authentication"])
+# Create app instance
+app = create_app()
 
-# --- Run Uvicorn ---
+
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_config=None  # Use your custom logging configuration
+    )

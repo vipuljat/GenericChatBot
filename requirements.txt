@@ -14,3 +14,7 @@ python-dotenv==1.0.0
 qdrant-client>=1.14.0
 openai>=1.0.0
 tiktoken>=0.11.0
+PyPDF2>=3.0.0              # PDF extraction
+python-docx>=1.1.0         # DOCX extraction
+striprtf>=0.0.26           # RTF extraction
+pdfplumber>=0.10.0   
