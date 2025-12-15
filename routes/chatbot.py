@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from stateful_services.database import get_db
-from stateful_services.db_schema import Chatbot
+from stateful_services.db_schema import Chatbot, Question
 from services.chatbots_services import (
     create_chatbot_service,
     delete_chatbot_service,
@@ -33,6 +33,8 @@ async def create_chatbot(
     generated_by: Optional[str] = Form(None, description="UUID of creator"),
     meta_data: Optional[str] = Form(None, description="JSON metadata"),
     documents: List[UploadFile] = File(..., description="Documents (PDF, DOCX, DOC, TXT, RTF)"),
+    mode: Optional[str] = Form("general", description="Chatbot mode (e.g., general, quiz, hybrid)"),
+    questions: Optional[dict] = Form(None, description="Quiz questions if in quiz mode"),
     db: Session = Depends(get_db),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
@@ -111,6 +113,8 @@ async def create_chatbot(
             doc_names=doc_names,
             generated_by=generated_by_uuid,
             meta_data=meta_data_dict,
+            mode=mode,
+            questions=questions,
             background_tasks=background_tasks
         )
         
@@ -194,9 +198,9 @@ async def list_chatbots(
         raise HTTPException(status_code=500, detail=f"Error listing chatbots: {str(e)}")
 
 
-@router.get("/{chatbot_name}", summary="Get chatbot details")
+@router.get("/{chatbot_id}", summary="Get chatbot details")
 async def get_chatbot(
-    chatbot_name: str,
+    chatbot_id: str,
     db: Session = Depends(get_db)
 ):
     """
@@ -210,14 +214,26 @@ async def get_chatbot(
     """
     try:
         chatbot = db.query(Chatbot).filter(
-            Chatbot.chatbot_name == chatbot_name
+            Chatbot.chatbot_id == chatbot_id
         ).first()
         
         if not chatbot:
             raise HTTPException(
                 status_code=404,
-                detail=f"Chatbot '{chatbot_name}' not found"
+                detail=f"Chatbot '{chatbot_id}' not found"
             )
+        
+        questions_data = None
+
+        if chatbot.mode == "quiz":
+            log.info(f"Fetching quiz chatbot: {chatbot.chatbot_name}")
+            questions = db.query(Question).filter(Question.chatbot_id == chatbot.chatbot_id).first()
+            print(questions)
+            if not questions:
+                questions_data = []
+            else:
+                questions_data = questions.question_data
+        
         
         return {
             "chatbot_id": str(chatbot.chatbot_id),
@@ -227,6 +243,8 @@ async def get_chatbot(
             "instruction": chatbot.instruction,
             "document_count": len(chatbot.pdf_names) if chatbot.pdf_names else 0,
             "document_names": chatbot.pdf_names,
+            "mode": chatbot.mode,
+            "questions": questions_data,
             "generated_by": str(chatbot.generated_by) if chatbot.generated_by else None,
             "created_at": chatbot.created_at.isoformat() if hasattr(chatbot, 'created_at') else None,
             "updated_at": chatbot.updated_at.isoformat() if hasattr(chatbot, 'updated_at') else None,
@@ -382,18 +400,18 @@ class QueryRequest(BaseModel):
     instructions: Optional[str] = None
     history: Optional[list[dict]] = None  # if you plan to support conversation history later
 
-@router.post("/user/{chatbot_name}/query")
+@router.post("/user/{chatbot_id}/query")
 async def user_query_chatbot(
-    chatbot_name: str,
+    chatbot_id: str,
     request: QueryRequest = Body(...),
     db: Session = Depends(get_db)
 ):
 
     # Fetch chatbot to validate existence and get default instructions
-    chatbot = db.query(Chatbot).filter(Chatbot.chatbot_name == chatbot_name).first()
+    chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
     if not chatbot:
-        raise HTTPException(status_code=404, detail=f"Chatbot '{chatbot_name}' not found")
-
+        raise HTTPException(status_code=404, detail=f"Chatbot '{chatbot_id}' not found")
+    chatbot_name = chatbot.chatbot_name
     # Use provided instructions or fallback to DB
     final_instructions = request.instructions or chatbot.instruction
 

@@ -74,8 +74,8 @@ async def auth_callback(code: str = None, error: str = None, error_description: 
         microsoft_id = user_info.get("id")
         if not microsoft_id:
             raise HTTPException(status_code=400, detail="No user ID in Microsoft response")
-            
-        employee_name = user_info.get("name") or "Unknown User"
+        print(user_info)    
+        employee_name = user_info.get("displayName") or "Unknown User"
         
         # Safely get email - try multiple fields
         employee_email = (

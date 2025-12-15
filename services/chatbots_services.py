@@ -1,5 +1,6 @@
 """Chatbot service with multi-format document processing and chunked embeddings."""
 
+import time
 import uuid
 from typing import List, Optional, Dict, Any
 import google.generativeai as genai
@@ -7,7 +8,7 @@ import config
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, BackgroundTasks
 from qdrant_client.models import Distance, VectorParams, PointStruct
-from stateful_services.db_schema import Chatbot
+from stateful_services.db_schema import Chatbot, Question
 from stateful_services.database import qdrant_manager
 from utils.document_service import extract_text_from_document, get_file_extension
 from utils.embedding import process_document_for_embedding
@@ -201,6 +202,8 @@ def create_chatbot_service(
     doc_names: Optional[List[str]] = None,
     generated_by: Optional[uuid.UUID] = None,
     meta_data: Optional[Dict[str, Any]] = None,
+    mode: Optional[str] = "general",
+    questions: Optional[dict] = None,   
     background_tasks: Optional[BackgroundTasks] = None
 ) -> Chatbot:
     """
@@ -245,6 +248,7 @@ def create_chatbot_service(
             instruction=instruction,
             pdf_names=doc_names or [],  # Store all document names
             status=status,
+            mode=mode,
             generated_by=generated_by,
             meta_data=meta_data or {}
         )
@@ -256,7 +260,23 @@ def create_chatbot_service(
         log.info(
             f"Chatbot '{chatbot_name}' created with ID {new_chatbot.chatbot_id}"
         )
-        
+
+        if questions and mode == "quiz":
+            existing_questions= db.query(Question).filter(Question.chatbot_id == new_chatbot.chatbot_id).first()
+            if not existing_questions:
+                new_questions = Question(
+                    chatbot_id=new_chatbot.chatbot_id,
+                    question_data=questions
+                )
+                db.add(new_questions)
+                db.commit()
+                db.refresh(new_questions)
+            else:
+                existing_questions.question_data = questions
+                db.commit()
+                db.refresh(existing_questions)    
+                
+                   
         # Schedule background embedding task if documents exist
         if doc_contents and doc_names and background_tasks:
             background_tasks.add_task(
@@ -288,7 +308,8 @@ def search_similar_chunks(
     chatbot_name: str,
     query: str,
     top_k: int = 5,
-    document_type: Optional[str] = None
+    document_type: Optional[str] = None,
+    min_score: float = 0.5  # New: minimum similarity score threshold
 ) -> List[Dict[str, Any]]:
     """
     Search for similar chunks in Qdrant for a given query.
@@ -298,6 +319,7 @@ def search_similar_chunks(
         query: Search query text
         top_k: Number of results to return
         document_type: Optional filter by document type (pdf, docx, txt, etc.)
+        min_score: Minimum similarity score to consider a chunk relevant
         
     Returns:
         List of similar chunks with scores and metadata
@@ -349,21 +371,22 @@ def search_similar_chunks(
 
         results = response.points
         
-        # Format results
+        # Format results, filtering by min_score
         chunks = []
         for result in results:
-            chunks.append({
-                'text': result.payload.get('text'),
-                'source_file': result.payload.get('source_file'),
-                'document_type': result.payload.get('document_type'),
-                'chunk_index': result.payload.get('chunk_index'),
-                'total_chunks': result.payload.get('total_chunks'),
-                'score': float(result.score),
-                'metadata': result.payload
-            })
+            if float(result.score) >= min_score:
+                chunks.append({
+                    'text': result.payload.get('text'),
+                    'source_file': result.payload.get('source_file'),
+                    'document_type': result.payload.get('document_type'),
+                    'chunk_index': result.payload.get('chunk_index'),
+                    'total_chunks': result.payload.get('total_chunks'),
+                    'score': float(result.score),
+                    'metadata': result.payload
+                })
         
         log.info(
-            f"Found {len(chunks)} similar chunks for query in chatbot '{chatbot_name}'"
+            f"Found {len(chunks)} similar chunks (after min_score filter) for query in chatbot '{chatbot_name}'"
         )
         
         return chunks
@@ -381,7 +404,8 @@ def get_chatbot_context(
     query: str, 
     max_context_length: int = 3000,
     document_type: Optional[str] = None,
-    min_chunk_chars: int = 20  # Skip very short or meaningless chunks
+    min_chunk_chars: int = 20,  # Skip very short or meaningless chunks
+    min_score: float = 0.5  # New: pass min_score to search
 ) -> str:
     """
     Get relevant context for a query by searching similar chunks.
@@ -392,7 +416,8 @@ def get_chatbot_context(
             chatbot_name=chatbot_name, 
             query=query, 
             top_k=10,
-            document_type=document_type
+            document_type=document_type,
+            min_score=min_score  # New: pass min_score
         )
         
         if not chunks:
@@ -507,190 +532,288 @@ Handles query processing, context retrieval, and response generation in one call
 
 
 
+# def rag_query_service(
+#     chatbot_name: str,
+#     query: str,
+#     chatbot_instructions: Optional[str] = None,
+#     conversation_history: Optional[List[Dict[str, str]]] = None,
+#     model_name: Optional[str] = None,
+#     top_k: int = 5,
+#     max_context_length: int = 3000,
+#     max_retries: int = 3,
+#     min_relevance_score: float = 0.5  # New: threshold for considering context relevant
+# ) -> Dict:
+#     """
+#     Full RAG query service with friendly fallback for casual chat (greetings, hello, etc.)
+#     """
+#     try:
+#         log.info(f"Retrieving context for query in chatbot '{chatbot_name}': {query[:50]}...")
+#         context = get_chatbot_context(
+#             chatbot_name=chatbot_name,
+#             query=query,
+#             max_context_length=max_context_length,
+#             min_score=min_relevance_score  # New: pass min_score
+#         )
+
+#         resolved_model = model_name or config.GEMINI_MODEL
+
+#         # If no relevant context found → treat as casual conversation
+#         if not context:
+#             log.info(f"No document context found – responding conversationally to: {query}")
+#             friendly_prompt = f"""
+# You are a friendly and helpful chatbot assistant.
+
+# User said: {query}
+
+# Respond naturally, warmly, and concisely. Greet back if it's a greeting.
+# Do not mention documents or sources since none were relevant.
+# """
+
+#             try:
+#                 model = genai.GenerativeModel(resolved_model)
+#                 response_obj = model.generate_content(friendly_prompt)
+#                 return {
+#                     "response": response_obj.text.strip(),
+#                     "sources": [],
+#                     "context_used": False,
+#                     "num_chunks_used": 0
+#                 }
+#             except Exception as e:
+#                 log.error(f"Failed casual response generation: {e}")
+#                 return {
+#                     "response": "Hi there! How can I help you today?",
+#                     "sources": [],
+#                     "context_used": False
+#                 }
+
+#         # Context found → use RAG with sources
+#         system_prompt = chatbot_instructions or (
+#             "You are a knowledgeable assistant. "
+#             "Answer accurately using the provided document context. "
+#             "Be clear, concise, and helpful. "
+#             "If citing, reference the source naturally."
+#         )
+
+#         prompt = f"""Relevant Document Context:
+# {context}
+
+# Instructions: {system_prompt}
+
+# User Question: {query}
+
+# SYSTEM INSTRUCTIONS:
+
+# Provide a clear and accurate answer based ONLY on the context if it's directly relevant.
+# If the context doesn't seem relevant to the question (e.g., if the user is just greeting or chatting casually), ignore the context and respond naturally as a friendly assistant.
+# Behave like the knowledge is your own - do not say things like "Based on the documents" or "From the provided context".
+# Do not mention the sources or documents in your response unless explicitly asked.
+
+# """
+        
+#         log.info(f"Generating RAG response with {resolved_model}")
+
+#         response_obj = _generate_with_retry(
+#             prompt=prompt,
+#             conversation_history=conversation_history,
+#             model_name=resolved_model,
+#             max_retries=max_retries
+#         )
+
+#         # Extract sources
+#         chunks = search_similar_chunks(chatbot_name=chatbot_name, query=query, top_k=top_k, min_score=min_relevance_score)
+#         sources = [
+#             {
+#                 "source_file": chunk['source_file'],
+#                 "document_type": chunk['document_type'],
+#                 "relevance_score": round(chunk['score'], 3),
+#                 "chunk_index": chunk['chunk_index']
+#             }
+#             for chunk in chunks
+#             if chunk.get('text') and len(str(chunk['text']).strip()) >= 20  # only meaningful chunks
+#         ]
+
+#         log.info("RAG query completed successfully with context")
+#         return {
+#             "response": response_obj.text.strip(),
+#             "sources": sources,
+#             "context_used": True,
+#             "num_chunks_used": len(sources)
+#         }
+
+#     except Exception as e:
+#         log.error(f"RAG query failed: {str(e)}", exc_info=True)
+#         return {
+#             "response": "Sorry, something went wrong. Please try again!",
+#             "sources": [],
+#             "context_used": False,
+#             "error": str(e)
+#         }
+
+
+
+
 def rag_query_service(
     chatbot_name: str,
     query: str,
     chatbot_instructions: Optional[str] = None,
     conversation_history: Optional[List[Dict[str, str]]] = None,
     model_name: Optional[str] = None,
-    top_k: int = 5,
-    max_context_length: int = 3000,
-    max_retries: int = 3
+    top_k: int = 10,
+    max_context_length: int = 4000,
+    max_retries: int = 3,
+    min_relevance_score: float = 0.55  # Increased threshold for more reliable relevance
 ) -> Dict:
     """
-    Full RAG query service with intelligent fallback for casual conversation.
-    Uses best-practice prompt engineering for grounded, safe, and natural responses.
+    Enhanced RAG service that behaves like a natural, consistent chatbot.
+    Handles greetings, casual chat, and document-based questions seamlessly.
     """
-
     try:
-        log.info(f"Retrieving context for chatbot '{chatbot_name}' | Query: {query[:80]}")
+        log.info(f"Processing query for chatbot '{chatbot_name}': {query[:60]}...")
 
+        # Retrieve potentially relevant context
         context = get_chatbot_context(
             chatbot_name=chatbot_name,
             query=query,
-            max_context_length=max_context_length
+            max_context_length=max_context_length,
+            min_score=min_relevance_score  # Only include truly relevant chunks
         )
 
         resolved_model = model_name or config.GEMINI_MODEL
 
-        # ---------------------------------------------------------------------
-        # CASUAL / NO-CONTEXT FALLBACK
-        # ---------------------------------------------------------------------
-        if not context:
-            log.info("No relevant context found. Switching to conversational mode.")
+        # Base personality/instructions
+        base_instructions = chatbot_instructions or (
+            "You are a friendly, knowledgeable, and helpful assistant. "
+            "You answer clearly, concisely, and naturally. "
+            "You remember the conversation and respond in a consistent tone."
+        )
 
-            casual_system_prompt = """
-            You are a friendly, polite, and helpful conversational assistant.
+        # Unified prompt – works whether context is present or not
+        prompt = f"""Relevant Document Context (use ONLY if directly relevant to the user's question):
+{context if context else "(No relevant document information found)"}
 
-            Guidelines:
-            - Respond naturally and warmly.
-            - Keep responses concise and human-like.
-            - If the user greets you, greet them back.
-            - If the user asks a general question, answer to the best of your ability.
-            - Do NOT mention documents, sources, databases, or training data.
-            - Do NOT say you could not find context or documents.
-            """
+Conversation Instructions:
+{base_instructions}
 
-            casual_prompt = f"""
-            User Message:
-            {query}
+Important Rules:
+- Answer naturally, as if the knowledge is your own. Never say "based on the documents", "according to the context", or mention sources unless the user explicitly asks for them.
+- If the user's message is a greeting (hi, hello, how are you, etc.), casual chat, or off-topic, respond warmly and conversationally. Ignore the document context in these cases.
+- If the question is clearly related to the documents and the context above helps, use it to give an accurate answer.
+- Keep responses engaging, friendly, and appropriate to the conversation flow.
+- Do not hallucinate information not supported by the context when answering document-related questions.
 
-            Assistant Response:
-            """
+User's message: {query}
 
-            try:
-                model = genai.GenerativeModel(resolved_model)
-                response_obj = model.generate_content(
-                    f"{casual_system_prompt}\n{casual_prompt}"
-                )
+Respond directly and naturally."""
 
-                return {
-                    "response": response_obj.text.strip(),
-                    "sources": [],
-                    "context_used": False,
-                    "num_chunks_used": 0
-                }
-
-            except Exception as e:
-                log.error(f"Casual response generation failed: {e}")
-                return {
-                    "response": "Hi! 😊 How can I help you today?",
-                    "sources": [],
-                    "context_used": False,
-                    "num_chunks_used": 0
-                }
-
-        # ---------------------------------------------------------------------
-        # RAG MODE (CONTEXT FOUND)
-        # ---------------------------------------------------------------------
-        system_prompt = chatbot_instructions or """
-            You are a knowledgeable and reliable assistant.
-
-            Core Principles:
-            - Use ONLY the information provided in the context to answer.
-            - If the answer is not clearly supported by the context, say so honestly.
-            - Do NOT fabricate details or make assumptions.
-            - Maintain a professional, clear, and concise tone.
-            - Do NOT mention documents, sources, embeddings, or retrieval.
-            - Answer as if you naturally know the information.
-            """
-
-        rag_prompt = f"""
-            ==============================
-            CONTEXT (AUTHORITATIVE)
-            ==============================
-            {context}
-
-            ==============================
-            USER QUESTION
-            ==============================
-            {query}
-
-            ==============================
-            INSTRUCTIONS
-            ==============================
-            - Provide a direct and accurate answer grounded in the context above.
-            - If the context does not fully answer the question, clearly state the limitation.
-            - Do NOT reference the existence of documents or context.
-            - Do NOT include phrases like:
-            "Based on the documents..."
-            "According to the provided sources..."
-            - Keep the response well-structured and easy to understand.
-
-            ASSISTANT RESPONSE:
-            """
-
-        log.info(f"Generating RAG response using model: {resolved_model}")
+        log.info(f"Generating response with {resolved_model} (context length: {len(context) if context else 0})")
 
         response_obj = _generate_with_retry(
-            prompt=rag_prompt,
+            prompt=prompt,
             conversation_history=conversation_history,
             model_name=resolved_model,
             max_retries=max_retries
         )
 
-        # ---------------------------------------------------------------------
-        # SOURCE METADATA (FOR CLIENT USE ONLY)
-        # ---------------------------------------------------------------------
-        chunks = search_similar_chunks(
-            chatbot_name=chatbot_name,
-            query=query,
-            top_k=top_k
-        )
-
-        sources = [
-            {
-                "source_file": chunk["source_file"],
-                "document_type": chunk["document_type"],
-                "relevance_score": round(chunk["score"], 3),
-                "chunk_index": chunk["chunk_index"]
-            }
-            for chunk in chunks
-            if chunk.get("text") and len(str(chunk["text"]).strip()) >= 20
-        ]
-
-        log.info("RAG query completed successfully")
+        # Only return sources if we actually used meaningful context
+        has_meaningful_context = bool(context and context.strip() and context != "(No relevant document information found)")
+        
+        if has_meaningful_context:
+            chunks = search_similar_chunks(
+                chatbot_name=chatbot_name,
+                query=query,
+                top_k=top_k,
+                min_score=min_relevance_score
+            )
+            sources = [
+                {
+                    "source_file": chunk['source_file'],
+                    "document_type": chunk['document_type'],
+                    "relevance_score": round(chunk['score'], 3),
+                    "chunk_index": chunk['chunk_index']
+                }
+                for chunk in chunks
+                if chunk.get('text') and len(str(chunk['text']).strip()) >= 20
+            ]
+        else:
+            sources = []
 
         return {
             "response": response_obj.text.strip(),
             "sources": sources,
-            "context_used": True,
+            "context_used": has_meaningful_context,
             "num_chunks_used": len(sources)
         }
 
     except Exception as e:
-        log.error("RAG query service failed", exc_info=True)
+        log.error(f"RAG query failed: {str(e)}", exc_info=True)
         return {
-            "response": "Sorry, something went wrong while processing your request. Please try again.",
+            "response": "Sorry, I'm having trouble right now. Please try again in a moment!",
             "sources": [],
             "context_used": False,
             "error": str(e)
         }
+        
+def _map_role_for_gemini(role_name: str) -> str:
+    """Maps internal or non-standard roles to the Gemini API's required roles ('user', 'model')."""
+    role_name_lower = role_name.lower()
+
+    if role_name_lower == 'user':
+        return 'user'
+
+    if role_name_lower in ['model', 'assistant','bot', 'ai', 'system']:
+        return 'model'
+    return 'user'
+
+# --- Main Generation Function ---
 def _generate_with_retry(
     prompt: str,
     conversation_history: Optional[List[Dict[str, str]]],
     model_name: str,
     max_retries: int
 ):
+    """
+    Generates content using the Gemini API, implementing retry logic 
+    for rate limit errors.
+    """
     backoff = 2
     last_error = None
-    import time
+    
     for attempt in range(1, max_retries + 1):
         try:
             model = genai.GenerativeModel(model_name)
+            
             if conversation_history:
-                chat = model.start_chat(history=[
-                    {"role": msg["role"], "parts": [msg["content"]]} for msg in conversation_history
-                ])
+                # 1. Map and format the history list for the Gemini API
+                history_for_gemini = [
+                    {
+                        # Use the helper function to ensure valid roles
+                        "role": _map_role_for_gemini(msg["role"]), 
+                        # Use "text" key inside parts, as required by the API's Content object format
+                        "parts": [{"text": msg["content"]}] 
+                    } 
+                    for msg in conversation_history
+                ]
+                
+                # 2. Start chat with the corrected history
+                chat = model.start_chat(history=history_for_gemini)
                 return chat.send_message(prompt)
+            
+            # If no conversation history, use generate_content directly
             return model.generate_content(prompt)
+            
         except Exception as e:
             msg = str(e)
             last_error = e
+            
+            # Rate Limit Retry Logic
             if ("429" in msg or "quota" in msg.lower() or "rate" in msg.lower()) and attempt < max_retries:
                 log.warning(f"Rate limit hit (attempt {attempt}); retrying after {backoff}s")
                 time.sleep(backoff)
                 backoff *= 2
                 continue
+            
+            # Break if it's a permanent error (like 400 InvalidArgument) or max retries reached
             break
+            
+    # Raise the last error encountered (which was likely the 400 InvalidArgument error)
     raise last_error or RuntimeError("Gemini generation failed after retries")
