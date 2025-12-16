@@ -52,13 +52,9 @@ class Answer(Base):
     __tablename__ = "answers"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    attempter_by_id = Column(UUID(as_uuid=True), ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
-    attempter_name = Column(String, nullable=True)
+    attempter_by_id = Column(String, ForeignKey("employees.employee_id", ondelete="SET NULL"), nullable=True)
     chatbot_id = Column(UUID(as_uuid=True), ForeignKey("chatbots.chatbot_id", ondelete="CASCADE"))
     answer_data = Column(JSONB, nullable=False)  # changed to JSONB
-    attempter_by_id = Column(UUID(as_uuid=True), ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
-    chatbot_id = Column(UUID(as_uuid=True), ForeignKey("chatbots.chatbot_id", ondelete="CASCADE"), nullable=True)
     chat_history = Column(Text, nullable=True)  # Full answer text
-    answer_data = Column(JSONB, nullable=True)  # Additional metadata
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

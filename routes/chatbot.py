@@ -228,45 +228,14 @@ async def get_chatbot(
         
         questions_data = None
 
-        # Always fetch questions if they exist (dual-mode support)
-        # Frontend can toggle between chatbot mode and quiz mode
-        log.info(f"Fetching chatbot: {chatbot.chatbot_name} (mode: {chatbot.mode})")
-        questions_list = db.query(Question).filter(
-            Question.chatbot_id == chatbot.chatbot_id
-        ).all()
-        
-        if not questions_list:
-            questions_data = []
-        else:
-            # Format all questions with their options for frontend display
-            questions_data = []
-            for q in questions_list:
-                q_data = q.question_data
-                if isinstance(q_data, dict):
-                    # If question_data contains a "questions" array (from quiz file upload)
-                    if "questions" in q_data:
-                        questions_array = q_data["questions"]
-                        if isinstance(questions_array, list):
-                            questions_data.extend(questions_array)
-                    else:
-                        # Individual question format
-                        question_info = {
-                            "question_id": str(q.question_id),
-                            "status": q.status,
-                            "created_at": q.created_at.isoformat() if q.created_at else None
-                        }
-                        
-                        # Extract question details including options
-                        question_info.update({
-                            "question_text": q_data.get("question"),
-                            "type": q_data.get("type"),
-                            "options": q_data.get("options"),  # Options array for frontend
-                            "difficulty": q_data.get("difficulty"),
-                            "points": q_data.get("points"),
-                            "metadata": q_data.get("metadata", {})
-                        })
-                        
-                        questions_data.append(question_info)
+        if chatbot.mode == "quiz":
+            log.info(f"Fetching quiz chatbot: {chatbot.chatbot_name}")
+            questions = db.query(Question).filter(Question.chatbot_id == chatbot.chatbot_id).first()
+            print(questions)
+            if not questions:
+                questions_data = []
+            else:
+                questions_data = questions.question_data
         
         
         return {
@@ -279,8 +248,6 @@ async def get_chatbot(
             "document_names": chatbot.pdf_names,
             "mode": chatbot.mode,
             "questions": questions_data,
-            "total_questions": len(questions_data) if questions_data else 0,
-            "has_quiz_capability": len(questions_data) > 0 if questions_data else False,
             "generated_by": str(chatbot.generated_by) if chatbot.generated_by else None,
             "created_at": chatbot.created_at.isoformat() if hasattr(chatbot, 'created_at') else None,
             "updated_at": chatbot.updated_at.isoformat() if hasattr(chatbot, 'updated_at') else None,
@@ -437,29 +404,6 @@ class QueryRequest(BaseModel):
     history: Optional[list[dict]] = None  # if you plan to support conversation history later
     user_id: Optional[str] = None  # For quiz mode to track attempter
 
-# @router.post("/user/{chatbot_id}/query")
-# async def user_query_chatbot(
-#     chatbot_id: str,
-#     request: QueryRequest = Body(...),
-#     db: Session = Depends(get_db)
-# ):
-
-#     # Fetch chatbot to validate existence and get default instructions
-#     chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
-#     if not chatbot:
-#         raise HTTPException(status_code=404, detail=f"Chatbot '{chatbot_id}' not found")
-#     chatbot_name = chatbot.chatbot_name
-#     # Use provided instructions or fallback to DB
-#     final_instructions = request.instructions or chatbot.instruction
-
-#     result = rag_query_service(
-#         chatbot_name=chatbot_name,
-#         query=request.query,
-#         chatbot_instructions=final_instructions,
-#         conversation_history=request.history or []
-#     )
-
-#     return result
 
 
 @router.post("/user/{chatbot_id}/query")
