@@ -86,6 +86,9 @@ def chat_with_chatbot(
     if not bool(getattr(chatbot, 'is_active', False)):
         raise HTTPException(status_code=400, detail="Chatbot is not active")
     
+    # Determine chatbot mode
+    chatbot_mode = "quiz" if bool(getattr(chatbot, 'is_quiz_mode', False)) else "chatbot"
+    
     # Get RAG service
     rag_service = get_rag_service()
     
@@ -93,6 +96,7 @@ def chat_with_chatbot(
     result = rag_service.generate_response(
         query=request.query,
         chatbot_id=chatbot_id,
+        chatbot_mode=chatbot_mode,  # Pass mode to RAG service
         chatbot_instructions=str(getattr(chatbot, 'instructions', '') or ''),
         conversation_history=request.conversation_history,
         model_name=str(getattr(chatbot, 'recommended_model', '') or '') or config.GEMINI_MODEL

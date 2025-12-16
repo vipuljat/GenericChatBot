@@ -3,6 +3,7 @@
 import time
 import uuid
 from typing import List, Optional, Dict, Any
+from datetime import datetime
 import google.generativeai as genai
 import config
 from sqlalchemy.orm import Session
@@ -302,6 +303,104 @@ def create_chatbot_service(
             status_code=500,
             detail=f"Failed to create chatbot: {str(e)}"
         )
+def update_chatbot_service(
+    db: Session,
+    chatbot_id: uuid.UUID,
+    chatbot_name: Optional[str] = None,
+    status: Optional[str] = None,
+    description: Optional[str] = None,
+    instruction: Optional[str] = None,
+    meta_data: Optional[Dict[str, Any]] = None,
+    mode: Optional[str] = None,
+    doc_contents: Optional[List[bytes]] = None,
+    doc_names: Optional[List[str]] = None,
+    questions: Optional[dict] = None,
+    background_tasks: Optional[BackgroundTasks] = None
+) -> Chatbot:
+    """
+    Update chatbot details and handle quiz questions & documents.
+    """
+
+    try:
+        chatbot = db.query(Chatbot).filter(
+            Chatbot.chatbot_id == chatbot_id
+        ).first()
+
+        if not chatbot:
+            raise HTTPException(status_code=404, detail="Chatbot not found")
+
+        # Unique name check
+        if chatbot_name and chatbot_name != chatbot.chatbot_name:
+            exists = db.query(Chatbot).filter(
+                Chatbot.chatbot_name == chatbot_name,
+                Chatbot.chatbot_id != chatbot_id
+            ).first()
+            if exists:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Chatbot name already exists"
+                )
+            chatbot.chatbot_name = chatbot_name
+
+        # Update fields only if provided
+        if status:
+            chatbot.status = status
+        if description is not None:
+            chatbot.description = description
+        if instruction is not None:
+            chatbot.instruction = instruction
+        if meta_data is not None:
+            chatbot.meta_data = meta_data
+        if mode:
+            chatbot.mode = mode
+
+        # Replace documents if provided
+        if doc_names:
+            chatbot.pdf_names = doc_names
+
+        db.commit()
+        db.refresh(chatbot)
+
+        # ---- QUIZ QUESTION HANDLING ----
+        if questions and chatbot.mode == "quiz":
+            existing_questions = db.query(Question).filter(
+                Question.chatbot_id == chatbot.chatbot_id
+            ).first()
+
+            if existing_questions:
+                existing_questions.question_data = questions
+                db.commit()
+                db.refresh(existing_questions)
+            else:
+                new_questions = Question(
+                    chatbot_id=chatbot.chatbot_id,
+                    question_data=questions
+                )
+                db.add(new_questions)
+                db.commit()
+                db.refresh(new_questions)
+
+        # ---- BACKGROUND DOCUMENT PROCESSING ----
+        if doc_contents and doc_names and background_tasks:
+            background_tasks.add_task(
+                _process_documents_and_store_embeddings,
+                chatbot_name=chatbot.chatbot_name,
+                doc_contents=doc_contents,
+                doc_names=doc_names
+            )
+
+        log.info(f"Chatbot updated successfully: {chatbot.chatbot_id}")
+        return chatbot
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        log.error(f"Failed to update chatbot {chatbot_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update chatbot: {str(e)}"
+        )
 
 
 def search_similar_chunks(
@@ -534,6 +633,7 @@ Handles query processing, context retrieval, and response generation in one call
 def rag_query_service(
     chatbot_name: str,
     query: str,
+    chatbot_mode: str = "chatbot",  # "chatbot" or "quiz"
     chatbot_instructions: Optional[str] = None,
     conversation_history: Optional[List[Dict[str, str]]] = None,
     model_name: Optional[str] = None,
@@ -696,3 +796,5 @@ def _generate_with_retry(
             
     # Raise the last error encountered (which was likely the 400 InvalidArgument error)
     raise last_error or RuntimeError("Gemini generation failed after retries")
+
+

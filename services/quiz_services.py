@@ -520,7 +520,7 @@ Keep your response concise (2-3 sentences max).
 def _handle_quiz_completion(
     db: Session,
     chatbot_id: str,
-    user_id: Optional[uuid.UUID],
+    user_id: Optional[str],
     quiz_state: Dict[str, Any],
     questions: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
@@ -555,7 +555,7 @@ def _handle_quiz_completion(
         log.info(f"Quiz completed and saved with ID: {new_answer.id}")
         
         # Simple completion message without detailed summary
-        response = "✅ Quiz completed! Your answers have been submitted successfully. Thank you!"
+        response = "Quiz completed! Your answers have been submitted successfully. Thank you!"
         
         return {
             "response": response,

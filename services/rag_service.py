@@ -5,6 +5,7 @@ Handles query processing, embedding search, and response generation
 from typing import List, Dict, Optional
 import logging
 from services.embedding_service import get_embedding_service
+from services.pipeline import get_system_prompt, Mode
 # from services.qdrant_service import get_qdrant_service
 import google.generativeai as genai
 import config
@@ -78,17 +79,19 @@ class RAGService:
         self,
         query: str,
         chatbot_id: int,
+        chatbot_mode: str = "chatbot",  # Added: "chatbot" or "quiz"
         chatbot_instructions: Optional[str] = None,
         conversation_history: Optional[List[Dict[str, str]]] = None,
         model_name: Optional[str] = None,
         max_retries: int = 3
     ) -> Dict:
         """
-        Generate a response using RAG
+        Generate a response using RAG with pipeline integration.
         
         Args:
             query: User's question
             chatbot_id: ID of the chatbot
+            chatbot_mode: Operating mode ("chatbot" or "quiz")
             chatbot_instructions: Custom instructions for the chatbot
             conversation_history: Previous conversation messages
             model_name: Gemini model to use
@@ -103,27 +106,70 @@ class RAGService:
                 chatbot_id=chatbot_id,
                 top_k=5
             )
-            
-            if not context:
+            # No context found - use pipeline casual mode
+            if not context or not context.strip():
+                logger.info("No relevant context found. Using conversational mode with pipeline.")
+                
+                # Get pipeline system prompt
+                system_prompt = get_system_prompt(
+                    mode=chatbot_mode,
+                    custom_instructions=chatbot_instructions
+                )
+                
+                casual_prompt = f"""
+                {system_prompt}
+                
+                User Question: {query}
+                
+                Assistant Response:
+                """
+                
+                resolved_model = model_name or config.GEMINI_MODEL
+                logger.info(f"Generating casual response with {resolved_model}")
+                
+                response_obj = self._generate_with_retry(
+                    prompt=casual_prompt,
+                    conversation_history=conversation_history,
+                    initial_model=resolved_model,
+                    max_retries=max_retries
+                )
+                
                 return {
-                    "response": "I couldn't find any relevant information in the documents to answer your question. Please try rephrasing or ask something else.",
+                    "response": response_obj.text.strip(),
                     "sources": [],
-                    "context_used": False
+                    "context_used": False,
+                    "num_chunks_used": 0
                 }
             
-            # Build the prompt
-            system_prompt = chatbot_instructions or "You are a helpful assistant. Answer questions based on the provided context."
+            # Build the prompt using pipeline system prompt
+            system_prompt = get_system_prompt(
+                mode=chatbot_mode,
+                custom_instructions=chatbot_instructions
+            )
             
-            prompt = f"""You are an AI assistant helping users with questions based on provided documents.
+            # RAG prompt with context - follows pipeline rules
+            prompt = f"""
+{system_prompt}
 
-Context from relevant documents:
+==============================
+CONTEXT (AUTHORITATIVE)
+==============================
 {context}
 
-Instructions: {system_prompt}
+==============================
+USER QUESTION
+==============================
+{query}
 
-User Question: {query}
+==============================
+RESPONSE GUIDELINES
+==============================
+- Provide a direct and accurate answer grounded in the context above.
+- If the context does not fully answer the question, clearly state the limitation.
+- Keep the response well-structured and easy to understand.
 
-Please provide a clear, accurate answer based ONLY on the information in the context above. If the context doesn't contain enough information to answer the question, say so clearly. Cite which document(s) you used."""
+ASSISTANT RESPONSE:
+"""
             
             # Resolve model name (prefer explicit param, then config)
             resolved_model = model_name or config.GEMINI_MODEL

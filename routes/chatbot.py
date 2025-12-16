@@ -1,6 +1,6 @@
 """Chatbot API routes with multi-format document upload support."""
 
-from typing import Dict, Optional, List
+from typing import Any, Dict, Optional, List
 import uuid
 import json
 
@@ -17,8 +17,10 @@ from services.chatbots_services import (
     delete_chatbot_service,
     rag_query_service,
     search_similar_chunks,
-    get_chatbot_context
+    get_chatbot_context,
+    update_chatbot_service
 )
+from services.document_service import render_quiz_questions
 from utils.document_service import is_supported_document, get_supported_extensions
 from utils.logging import log
 
@@ -124,6 +126,7 @@ async def create_chatbot(
             f"{chatbot.chatbot_name} (ID: {chatbot.chatbot_id})"
         )
         
+       
         return {
             "chatbot_id": str(chatbot.chatbot_id),
             "chatbot_name": chatbot.chatbot_name,
@@ -140,7 +143,6 @@ async def create_chatbot(
     except Exception as e:
         log.error(f"Error creating chatbot: {e}")
         raise HTTPException(status_code=500, detail=f"Error creating chatbot: {str(e)}")
-
 
 @router.get("/list", summary="List all chatbots")
 async def list_chatbots(
@@ -402,29 +404,6 @@ class QueryRequest(BaseModel):
     history: Optional[list[dict]] = None  # if you plan to support conversation history later
     user_id: Optional[str] = None  # For quiz mode to track attempter
 
-# @router.post("/user/{chatbot_id}/query")
-# async def user_query_chatbot(
-#     chatbot_id: str,
-#     request: QueryRequest = Body(...),
-#     db: Session = Depends(get_db)
-# ):
-
-#     # Fetch chatbot to validate existence and get default instructions
-#     chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
-#     if not chatbot:
-#         raise HTTPException(status_code=404, detail=f"Chatbot '{chatbot_id}' not found")
-#     chatbot_name = chatbot.chatbot_name
-#     # Use provided instructions or fallback to DB
-#     final_instructions = request.instructions or chatbot.instruction
-
-#     result = rag_query_service(
-#         chatbot_name=chatbot_name,
-#         query=request.query,
-#         chatbot_instructions=final_instructions,
-#         conversation_history=request.history or []
-#     )
-
-#     return result
 
 
 @router.post("/user/{chatbot_id}/query")
