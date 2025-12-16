@@ -152,6 +152,7 @@ def check_db_health() -> bool:
 
 def check_qdrant_health() -> bool:
     """Check Qdrant health status."""
+    print(config.QDRANT_HOST, config.QDRANT_PORT)
     return qdrant_manager.check_health()
 
 
@@ -159,5 +160,5 @@ def check_all_health() -> dict[str, bool]:
     """Check health of all database services."""
     return {
         "database": check_db_health(),
-        "qdrant": check_qdrant_health()
+         "qdrant": check_qdrant_health()
     }

@@ -1,6 +1,6 @@
 """Chatbot API routes with multi-format document upload support."""
 
-from typing import Dict, Optional, List
+from typing import Any, Dict, Optional, List
 import uuid
 import json
 
@@ -17,8 +17,10 @@ from services.chatbots_services import (
     delete_chatbot_service,
     rag_query_service,
     search_similar_chunks,
-    get_chatbot_context
+    get_chatbot_context,
+    update_chatbot_service
 )
+from services.document_service import render_quiz_questions
 from utils.document_service import is_supported_document, get_supported_extensions
 from utils.logging import log
 
@@ -124,6 +126,7 @@ async def create_chatbot(
             f"{chatbot.chatbot_name} (ID: {chatbot.chatbot_id})"
         )
         
+       
         return {
             "chatbot_id": str(chatbot.chatbot_id),
             "chatbot_name": chatbot.chatbot_name,
@@ -140,7 +143,6 @@ async def create_chatbot(
     except Exception as e:
         log.error(f"Error creating chatbot: {e}")
         raise HTTPException(status_code=500, detail=f"Error creating chatbot: {str(e)}")
-
 
 @router.get("/list", summary="List all chatbots")
 async def list_chatbots(
@@ -226,14 +228,45 @@ async def get_chatbot(
         
         questions_data = None
 
-        if chatbot.mode == "quiz":
-            log.info(f"Fetching quiz chatbot: {chatbot.chatbot_name}")
-            questions = db.query(Question).filter(Question.chatbot_id == chatbot.chatbot_id).first()
-            print(questions)
-            if not questions:
-                questions_data = []
-            else:
-                questions_data = questions.question_data
+        # Always fetch questions if they exist (dual-mode support)
+        # Frontend can toggle between chatbot mode and quiz mode
+        log.info(f"Fetching chatbot: {chatbot.chatbot_name} (mode: {chatbot.mode})")
+        questions_list = db.query(Question).filter(
+            Question.chatbot_id == chatbot.chatbot_id
+        ).all()
+        
+        if not questions_list:
+            questions_data = []
+        else:
+            # Format all questions with their options for frontend display
+            questions_data = []
+            for q in questions_list:
+                q_data = q.question_data
+                if isinstance(q_data, dict):
+                    # If question_data contains a "questions" array (from quiz file upload)
+                    if "questions" in q_data:
+                        questions_array = q_data["questions"]
+                        if isinstance(questions_array, list):
+                            questions_data.extend(questions_array)
+                    else:
+                        # Individual question format
+                        question_info = {
+                            "question_id": str(q.question_id),
+                            "status": q.status,
+                            "created_at": q.created_at.isoformat() if q.created_at else None
+                        }
+                        
+                        # Extract question details including options
+                        question_info.update({
+                            "question_text": q_data.get("question"),
+                            "type": q_data.get("type"),
+                            "options": q_data.get("options"),  # Options array for frontend
+                            "difficulty": q_data.get("difficulty"),
+                            "points": q_data.get("points"),
+                            "metadata": q_data.get("metadata", {})
+                        })
+                        
+                        questions_data.append(question_info)
         
         
         return {
@@ -246,6 +279,8 @@ async def get_chatbot(
             "document_names": chatbot.pdf_names,
             "mode": chatbot.mode,
             "questions": questions_data,
+            "total_questions": len(questions_data) if questions_data else 0,
+            "has_quiz_capability": len(questions_data) > 0 if questions_data else False,
             "generated_by": str(chatbot.generated_by) if chatbot.generated_by else None,
             "created_at": chatbot.created_at.isoformat() if hasattr(chatbot, 'created_at') else None,
             "updated_at": chatbot.updated_at.isoformat() if hasattr(chatbot, 'updated_at') else None,
