@@ -9,6 +9,7 @@ from fastapi.params import Body
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from services.quiz_services import quiz_query_service
 from stateful_services.database import get_db
 from stateful_services.db_schema import Chatbot, Question
 from services.chatbots_services import (
@@ -399,6 +400,32 @@ class QueryRequest(BaseModel):
     query: str
     instructions: Optional[str] = None
     history: Optional[list[dict]] = None  # if you plan to support conversation history later
+    user_id: Optional[str] = None  # For quiz mode to track attempter
+
+# @router.post("/user/{chatbot_id}/query")
+# async def user_query_chatbot(
+#     chatbot_id: str,
+#     request: QueryRequest = Body(...),
+#     db: Session = Depends(get_db)
+# ):
+
+#     # Fetch chatbot to validate existence and get default instructions
+#     chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
+#     if not chatbot:
+#         raise HTTPException(status_code=404, detail=f"Chatbot '{chatbot_id}' not found")
+#     chatbot_name = chatbot.chatbot_name
+#     # Use provided instructions or fallback to DB
+#     final_instructions = request.instructions or chatbot.instruction
+
+#     result = rag_query_service(
+#         chatbot_name=chatbot_name,
+#         query=request.query,
+#         chatbot_instructions=final_instructions,
+#         conversation_history=request.history or []
+#     )
+
+#     return result
+
 
 @router.post("/user/{chatbot_id}/query")
 async def user_query_chatbot(
@@ -406,20 +433,86 @@ async def user_query_chatbot(
     request: QueryRequest = Body(...),
     db: Session = Depends(get_db)
 ):
-
-    # Fetch chatbot to validate existence and get default instructions
-    chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
-    if not chatbot:
-        raise HTTPException(status_code=404, detail=f"Chatbot '{chatbot_id}' not found")
-    chatbot_name = chatbot.chatbot_name
-    # Use provided instructions or fallback to DB
-    final_instructions = request.instructions or chatbot.instruction
-
-    result = rag_query_service(
-        chatbot_name=chatbot_name,
-        query=request.query,
-        chatbot_instructions=final_instructions,
-        conversation_history=request.history or []
-    )
-
-    return result
+    """
+    Universal chatbot query endpoint.
+    Handles both general RAG mode and quiz mode based on chatbot configuration.
+    
+    Args:
+        chatbot_id: UUID of the chatbot
+        request: Query request with message, optional instructions, and history
+        db: Database session
+        
+    Returns:
+        Response based on chatbot mode:
+        - General mode: RAG response with sources
+        - Quiz mode: Interactive quiz response with state management
+    """
+    try:
+        # Fetch chatbot to validate existence and get configuration
+        chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
+        if not chatbot:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Chatbot '{chatbot_id}' not found"
+            )
+        
+        chatbot_name = chatbot.chatbot_name
+        chatbot_mode = chatbot.mode or "general"
+        
+        log.info(f"Processing query for chatbot '{chatbot_name}' in '{chatbot_mode}' mode")
+        
+        # Route to appropriate service based on mode
+        if chatbot_mode == "quiz":
+            # Handle quiz mode
+            user_id = None
+            if request.user_id:
+                try:
+                    user_id = uuid.UUID(request.user_id)
+                except ValueError:
+                    log.warning(f"Invalid user_id format: {request.user_id}")
+            
+            result = quiz_query_service(
+                db=db,
+                chatbot_id=chatbot_id,
+                chatbot_name=chatbot_name,
+                query=request.query,
+                conversation_history=request.history or [],
+                user_id=user_id
+            )
+            
+            return {
+                "mode": "quiz",
+                "response": result["response"],
+                "quiz_state": result.get("quiz_state", {}),
+                "metadata": result.get("metadata", {}),
+                "error": result.get("error")
+            }
+        
+        else:
+            # Handle general RAG mode (default)
+            final_instructions = request.instructions or chatbot.instruction
+            
+            result = rag_query_service(
+                chatbot_name=chatbot_name,
+                query=request.query,
+                chatbot_instructions=final_instructions,
+                conversation_history=request.history or []
+            )
+            
+            return {
+                "mode": "general",
+                "response": result["response"],
+                "sources": result.get("sources", []),
+                "context_used": result.get("context_used", False),
+                "num_chunks_used": result.get("num_chunks_used", 0),
+                "error": result.get("error")
+            }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Chatbot query failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to process query: {str(e)}"
+        )

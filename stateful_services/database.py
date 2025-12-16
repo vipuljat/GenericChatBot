@@ -120,6 +120,7 @@ class QdrantManager:
 # --------------------------
 
 db_manager = DatabaseManager(config.DATABASE_URL)
+print(config.QDRANT_HOST, config.QDRANT_PORT)
 qdrant_manager = QdrantManager(config.QDRANT_HOST, config.QDRANT_PORT)
 
 
