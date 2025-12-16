@@ -229,20 +229,20 @@ def quiz_query_service(
             Question.status == "active"
         ).first()
         
-        if not question_record or not question_record.question_data:
-            return {
-                "response": "Sorry, no active questions found for this quiz. Please contact the administrator.",
-                "quiz_state": {"completed": True},
-                "error": "No questions available"
-            }
+        # if not question_record or not question_record.question_data:
+        #     return {
+        #         "response": "Sorry, no active questions found for this quiz. Please contact the administrator.",
+        #         "quiz_state": {"completed": True},
+        #         "error": "No questions available"
+        #     }
         
-        questions = question_record.question_data
-        if not questions:
-            return {
-                "response": "Sorry, this quiz has no questions configured.",
-                "quiz_state": {"completed": True},
-                "error": "Empty questions list"
-            }
+        questions = question_record.get('question_data', []) if question_record else []
+        # if not questions:
+        #     return {
+        #         "response": "Sorry, this quiz has no questions configured.",
+        #         "quiz_state": {"completed": True},
+        #         "error": "Empty questions list"
+        #     }
         
         # Extract or initialize quiz state
         quiz_state = _get_quiz_session_from_history(conversation_history)
