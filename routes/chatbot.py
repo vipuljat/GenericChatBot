@@ -3,6 +3,7 @@
 from typing import Any, Dict, Optional, List
 import uuid
 import json
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, UploadFile, File, Form, BackgroundTasks, HTTPException, Query
 from fastapi.params import Body
@@ -15,6 +16,7 @@ from stateful_services.db_schema import Chatbot, Question
 from services.chatbots_services import (
     create_chatbot_service,
     delete_chatbot_service,
+    get_chatbot_responses_service,
     rag_query_service,
     search_similar_chunks,
     get_chatbot_context,
@@ -144,6 +146,45 @@ async def create_chatbot(
         log.error(f"Error creating chatbot: {e}")
         raise HTTPException(status_code=500, detail=f"Error creating chatbot: {str(e)}")
 
+
+
+class ChatbotUpdate(BaseModel):
+    status: Optional[str] = None
+    description: Optional[str] = None
+    instruction: Optional[str] = None
+    mode: Optional[str] = None
+
+@router.patch("/{chatbot_id}", summary="Update chatbot settings")
+async def update_chatbot(
+    chatbot_id: str,
+    payload: ChatbotUpdate,
+    db: Session = Depends(get_db)
+):
+    chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
+    if not chatbot:
+        raise HTTPException(status_code=404, detail="Chatbot not found")
+
+    if payload.status is not None:
+        chatbot.status = payload.status
+    if payload.description is not None:
+        chatbot.description = payload.description
+    if payload.instruction is not None:
+        chatbot.instruction = payload.instruction
+    if payload.mode is not None:
+        chatbot.mode = payload.mode
+
+    db.commit()
+    db.refresh(chatbot)
+
+    return {
+        "chatbot_id": str(chatbot.chatbot_id),
+        "status": chatbot.status,
+        "description": chatbot.description,
+        "instruction": chatbot.instruction,
+        "mode": chatbot.mode,
+        "message": "Chatbot settings updated successfully"
+    }
+
 @router.get("/list", summary="List all chatbots")
 async def list_chatbots(
     skip: int = Query(0, ge=0, description="Number of records to skip"),
@@ -207,13 +248,13 @@ async def get_chatbot(
     db: Session = Depends(get_db)
 ):
     """
-    Get details of a specific chatbot by name.
+    Get details of a specific chatbot by ID.
     
     **Parameters:**
-    - **chatbot_name**: Name of the chatbot
+    - **chatbot_id**: UUID of the chatbot
     
     **Returns:**
-    - Chatbot details including documents
+    - Chatbot details including documents, questions, and metadata
     """
     try:
         chatbot = db.query(Chatbot).filter(
@@ -339,9 +380,9 @@ async def query_chatbot(
         raise HTTPException(status_code=500, detail=f"Error querying chatbot: {str(e)}")
 
 
-@router.delete("/{chatbot_name}", summary="Delete a chatbot")
+@router.delete("/{chatbot_id}", summary="Delete a chatbot")
 async def delete_chatbot(
-    chatbot_name: str,
+    chatbot_id: str,
     db: Session = Depends(get_db)
 ):
     """
@@ -350,26 +391,39 @@ async def delete_chatbot(
     **Warning:** This action cannot be undone. All document embeddings will be removed from Qdrant.
     
     **Parameters:**
-    - **chatbot_name**: Name of the chatbot to delete
+    - **chatbot_id**: UUID of the chatbot to delete
     
     **Returns:**
     - Confirmation message
     """
     try:
-        log.info(f"Deleting chatbot: {chatbot_name}")
+        log.info(f"Deleting chatbot with ID: {chatbot_id}")
         
+        # Find chatbot by ID first to get the name
+        chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
+        if not chatbot:
+            raise HTTPException(status_code=404, detail=f"Chatbot with ID '{chatbot_id}' not found")
+        
+        chatbot_name = chatbot.chatbot_name
+        
+        # Delete chatbot using the service (it uses chatbot_name internally)
         success = delete_chatbot_service(db, chatbot_name)
         
         if success:
+            # Also delete associated questions
+            db.query(Question).filter(Question.chatbot_id == chatbot_id).delete()
+            db.commit()
+            
             return {
                 "message": f"Chatbot '{chatbot_name}' deleted successfully",
+                "chatbot_id": chatbot_id,
                 "chatbot_name": chatbot_name,
                 "deleted": True
             }
         else:
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to delete chatbot '{chatbot_name}'"
+                detail=f"Failed to delete chatbot '{chatbot_id}'"
             )
         
     except HTTPException:
@@ -377,6 +431,77 @@ async def delete_chatbot(
     except Exception as e:
         log.error(f"Error deleting chatbot: {e}")
         raise HTTPException(status_code=500, detail=f"Error deleting chatbot: {str(e)}")
+
+
+@router.post("/submit-quiz", summary="Submit quiz answers")
+async def submit_quiz_answers(
+    chatbot_id: str = Body(...),
+    answers: List[Dict[str, Any]] = Body(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Submit all quiz answers at once.
+    
+    **Parameters:**
+    - **chatbot_id**: UUID of the chatbot
+    - **answers**: List of answer objects with question_id and answer fields
+    
+    **Request body example:**
+    ```json
+    {
+      "chatbot_id": "uuid-string",
+      "answers": [
+        {"question_id": "uuid-1", "answer": "Answer 1"},
+        {"question_id": "uuid-2", "answer": "Answer 2"}
+      ]
+    }
+    ```
+    
+    **Returns:**
+    - Confirmation with submission details
+    """
+    try:
+        log.info(f"Submitting quiz for chatbot: {chatbot_id}, answers count: {len(answers)}")
+        
+        # Validate chatbot exists
+        chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
+        if not chatbot:
+            raise HTTPException(status_code=404, detail=f"Chatbot '{chatbot_id}' not found")
+        
+            # Save to database
+        from stateful_services.db_schema import Answer
+        from datetime import datetime
+        # Prepare answer data
+        
+    
+        
+        new_answer = Answer(
+            id=uuid.uuid4(),
+            chatbot_id=uuid.UUID(chatbot_id),
+            answer_data=answers,
+            attempter_by_id=None,  # Will be set if user authentication is available
+            chat_history=[]
+        )
+        
+        db.add(new_answer)
+        db.commit()
+        db.refresh(new_answer)
+        
+        log.info(f"Quiz submitted successfully with ID: {new_answer.id}")
+        
+        return {
+            "message": "Quiz submitted successfully",
+            "quiz_id": str(new_answer.id),
+            "chatbot_id": chatbot_id,
+            "answers_submitted": len(answers),
+            "submission_time": answer_data["submission_time"]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Quiz submission failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to submit quiz: {str(e)}")
 
 
 @router.get("/supported-formats", summary="Get list of supported document formats")
@@ -436,11 +561,12 @@ async def user_query_chatbot(
             )
         
         chatbot_name = chatbot.chatbot_name
-        chatbot_mode = chatbot.mode or "general"
+        chatbot_mode = str(chatbot.mode) if chatbot.mode else "general"
         
         log.info(f"Processing query for chatbot '{chatbot_name}' in '{chatbot_mode}' mode")
         
         # Route to appropriate service based on mode
+        
         if chatbot_mode == "quiz":
             # Handle quiz mode
             user_id = None
@@ -453,7 +579,7 @@ async def user_query_chatbot(
             result = quiz_query_service(
                 db=db,
                 chatbot_id=chatbot_id,
-                chatbot_name=chatbot_name,
+                chatbot_name=str(chatbot_name),
                 query=request.query,
                 conversation_history=request.history or [],
                 user_id=user_id
@@ -495,3 +621,37 @@ async def user_query_chatbot(
             status_code=500,
             detail=f"Failed to process query: {str(e)}"
         )
+
+##view reaponses of quiz submissions
+@router.get(
+    "/chatbots/{chatbot_id}/responses",
+    summary="View chatbot quiz responses (latest first)"
+)
+def get_chatbot_responses(
+    chatbot_id: str,
+    skip: int = 0,
+    limit: int = 10,
+    db: Session = Depends(get_db)
+):
+    """
+    Admin API to view quiz responses of a chatbot.
+    Latest responses are returned first.
+    """
+
+    try:
+        chatbot_uuid = uuid.UUID(chatbot_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid chatbot_id UUID")
+
+    responses = get_chatbot_responses_service(
+        db=db,
+        chatbot_id=chatbot_uuid,
+        skip=skip,
+        limit=limit
+    )
+
+    return {
+        "chatbot_id": chatbot_id,
+        "total": responses["total"],
+        "responses": responses["data"]
+    }

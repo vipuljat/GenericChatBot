@@ -9,7 +9,7 @@ import config
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, BackgroundTasks
 from qdrant_client.models import Distance, VectorParams, PointStruct
-from stateful_services.db_schema import Chatbot, Question
+from stateful_services.db_schema import Chatbot, Employee, Question, Answer
 from stateful_services.database import qdrant_manager
 from utils.document_service import extract_text_from_document, get_file_extension
 from utils.embedding import process_document_for_embedding
@@ -798,3 +798,67 @@ def _generate_with_retry(
     raise last_error or RuntimeError("Gemini generation failed after retries")
 
 
+####view reaponses of quiz submissions
+
+def get_chatbot_responses_service(
+    db: Session,
+    chatbot_id: uuid.UUID,
+    skip: int,
+    limit: int
+):
+    """
+    Fetch quiz responses for a chatbot in descending order (latest first).
+    Includes employee details.
+    """
+
+    # Check chatbot existence
+    chatbot = db.query(Chatbot).filter(
+        Chatbot.chatbot_id == chatbot_id
+    ).first()
+
+    if not chatbot:
+        raise HTTPException(status_code=404, detail="Chatbot not found")
+
+    # Total count
+    total = db.query(Answer).filter(
+        Answer.chatbot_id == chatbot_id
+    ).count()
+
+    # Main query (LATEST FIRST)
+    results = (
+        db.query(
+            Answer,
+            Employee.id.label("employee_id"),
+            Employee.name.label("employee_name"),
+            Employee.email.label("employee_email"),
+            Employee.role.label("employee_role")
+        )
+        .join(Employee, Employee.id == Answer.employee_id)
+        .filter(Answer.chatbot_id == chatbot_id)
+        .order_by(Answer.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+    response_list = []
+    for row in results:
+        quiz, emp_id, emp_name, emp_email, emp_role = row
+
+        response_list.append({
+            "response_id": str(quiz.id),
+            "submitted_at": quiz.created_at,
+            "last_question_answered": quiz.last_question,
+            "answers": quiz.answers,
+            "employee": {
+                "id": str(emp_id),
+                "name": emp_name,
+                "email": emp_email,
+                "role": emp_role
+            }
+        })
+
+    return {
+        "total": total,
+        "data": response_list
+    }
