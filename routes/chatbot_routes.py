@@ -1,4 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
+import uuid
 import config
 from sqlalchemy.orm import Session
 from stateful_services.database import get_db
@@ -123,12 +124,48 @@ def get_chatbot(chatbot_id: int, db: Session = Depends(get_db)):
     }
 
 @router.post("/quiz/render")
-async def upload_and_render_quiz_document(file: UploadFile = File(...)):
+async def upload_and_render_quiz_document(
+    file: UploadFile = File(...),
+    chatbot_id: str = Form(None),
+    db: Session = Depends(get_db)
+):
     """
     Upload and render quiz questions from a document.
     """
     try:
         rendered_questions = await render_quiz_questions(file)
+
+        # If a chatbot_id was provided, persist rendered questions into questions table
+        if chatbot_id:
+            try:
+                cb_uuid = uuid.UUID(chatbot_id)
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid chatbot_id UUID")
+
+            # Import stateful Chatbot and Question models to avoid model conflicts
+            from stateful_services.db_schema import Chatbot as StatefulChatbot, Question
+
+            chatbot = db.query(StatefulChatbot).filter(StatefulChatbot.chatbot_id == cb_uuid).first()
+            if not chatbot:
+                raise HTTPException(status_code=404, detail="Chatbot not found for provided chatbot_id")
+
+            # Persist each rendered question
+            persisted = []
+            for q in rendered_questions:
+                try:
+                    question = Question(chatbot_id=cb_uuid, question_data=q)
+                    db.add(question)
+                    persisted.append(question)
+                except Exception as e:
+                    # on error, continue with other questions but log
+                    import logging
+                    logging.getLogger(__name__).error(f"Failed to persist question: {e}")
+
+            if persisted:
+                db.commit()
+                for p in persisted:
+                    db.refresh(p)
+
         return {
             "file_name": file.filename,
             "total_questions": len(rendered_questions),

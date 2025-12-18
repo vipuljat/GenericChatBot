@@ -437,13 +437,21 @@ def get_user_answers_by_chatbot(chatbot_id: uuid.UUID, db: Session):
     chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
     if not chatbot:
         raise HTTPException(status_code=404, detail="Chatbot not found")
-    
-    answers = db.query(Answer).filter(Answer.chatbot_id == chatbot_id).all()
+    # Return answers ordered by newest first and include answer_id and chatbot_id
+    answers = (
+        db.query(Answer)
+        .filter(Answer.chatbot_id == chatbot_id)
+        .order_by(Answer.created_at.desc())
+        .all()
+    )
+
     return {
         "chatbot_id": str(chatbot_id),
         "chatbot_name": chatbot.chatbot_name,
         "answers": [
             {
+                "answer_id": str(a.id),
+                "chatbot_id": str(a.chatbot_id) if a.chatbot_id else str(chatbot_id),
                 "answer": a.answer_content,
                 "answer_data": a.answer_data,
                 "employee": {
@@ -452,6 +460,49 @@ def get_user_answers_by_chatbot(chatbot_id: uuid.UUID, db: Session):
                 },
                 "source_type": a.source_type,
                 "created_at": a.created_at.isoformat() if hasattr(a.created_at, 'isoformat') else None
+            }
+            for a in answers
+        ]
+    }
+
+
+@router.get("/chatbot/{chatbot_id}/latest", tags=["Answers"])
+def get_latest_answers(chatbot_id: uuid.UUID, limit: int = 10, db: Session = Depends(get_db)):
+    """Get the most recent answers for a chatbot.
+
+    - `limit` controls how many recent answers to return (default 10).
+    - Results are ordered newest first.
+    """
+    # Validate chatbot exists
+    chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
+    if not chatbot:
+        raise HTTPException(status_code=404, detail="Chatbot not found")
+
+    # Query latest answers ordered by creation time desc
+    answers = (
+        db.query(Answer)
+        .filter(Answer.chatbot_id == chatbot_id)
+        .order_by(Answer.created_at.desc())
+        .limit(int(limit))
+        .all()
+    )
+
+    return {
+        "chatbot_id": str(chatbot_id),
+        "chatbot_name": chatbot.chatbot_name,
+        "latest_count": len(answers),
+        "answers": [
+            {
+                "answer_id": str(a.id),
+                "answer_content": a.answer_content,
+                "answer_metadata": a.answer_data,
+                "source_type": a.source_type,
+                "employee": {
+                    "employee_id": str(a.attempter_id) if a.attempter_id else None,
+                    "employee_name": a.attempter_name
+                },
+                "created_at": a.created_at.isoformat() if hasattr(a.created_at, 'isoformat') else None,
+                "question_snapshot": a.question_snapshot
             }
             for a in answers
         ]

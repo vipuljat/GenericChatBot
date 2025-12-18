@@ -11,13 +11,18 @@ QUIZ_RENDERER_PROMPT = """
     "Output MUST be a valid JSON array. No text outside JSON."
     "Use Mixed Question Types: MCQ, Open-Text, True/False, Rating.",
     "Ensure variety in question types throughout the quiz.",
-    "Generate 20-20 questions maximum."
+    "Generate 20-20 questions maximum.",
+    "for Ethical questions use plus/minus type questions only."
   ],
   "question_type_rules": {
-    "mcq": "If the question contains options (A/B/C/D) or a predefined list of choices.",
-    "open-text": "If it asks for an explanation or is open-ended.",
-    "rating": "If it asks the user to rate proficiency or satisfaction (usually on a scale like 1-5).",
-    "default": "open-text"
+  "mcq": "If the question contains predefined options (A/B/C/D) or a fixed list of choices.",
+  "open-text": "If the question is open-ended and requires a descriptive or explanatory answer.",
+  "rating": "If the question asks the respondent to rate proficiency, satisfaction, or experience on a numerical scale.",
+  "plus/mminus": "If the question is a statement that can be answered with plus or minus or plus minus.",
+  "default": "open-text"
+},
+
+
   },
   "output_format_template": [
     {
@@ -37,21 +42,21 @@ QUIZ_RENDERER_PROMPT = """
       "category": "<inferred_category>"
     },
     {
-      "id": 2,
-      "text": "<question_text> (True/False)",
-      "type": "tf",
-      "order": 3,
-      "options": null,
-      "category": "<inferred_category>"
-    },
-    {
       "id": 3,
       "text": "Rate your proficiency in X on a scale of 1 to 5.",
       "type": "rating",
       "order": 4,
       "options": [1, 2, 3, 4, 5],
       "category": "<inferred_category>"
-    }
+    },
+        {
+      "id": 4,
+      "text": "<question_text>",
+      "type": "plusminus",
+      "order": 2,
+      "options": ["+", "-", "+-",],
+      "category": "<inferred_category>"
+    },
   ],
   "important_notes": [
     "Use sequential numbering starting from '0' for the 'id' field.",

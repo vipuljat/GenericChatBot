@@ -5,6 +5,18 @@ import uuid
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import google.generativeai as genai
+try:
+    from google.generativeai.types import Content, Part
+except Exception:
+    # Compatibility fallback when library version doesn't expose types module
+    class Part:
+        def __init__(self, text: str = None):
+            self.text = text
+
+    class Content:
+        def __init__(self, role: str = None, parts: Optional[List[Part]] = None):
+            self.role = role
+            self.parts = parts or []
 import config
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, BackgroundTasks
@@ -232,6 +244,7 @@ def create_chatbot_service(
         HTTPException: If chatbot name already exists
     """
     try:
+        print(f"Creating chatbot with name: {chatbot_name}")
         # Check if chatbot name already exists
         existing_chatbot = db.query(Chatbot).filter(
             Chatbot.chatbot_name == chatbot_name
@@ -262,7 +275,7 @@ def create_chatbot_service(
             f"Chatbot '{chatbot_name}' created with ID {new_chatbot.chatbot_id}"
         )
 
-        if questions and mode == "quiz":
+        if questions and mode in ("quiz", "people_analyzer"):
             existing_questions= db.query(Question).filter(Question.chatbot_id == new_chatbot.chatbot_id).first()
             if not existing_questions:
                 new_questions = Question(
@@ -369,6 +382,7 @@ def update_chatbot_service(
 
             if existing_questions:
                 existing_questions.question_data = questions
+                db.add(existing_questions)
                 db.commit()
                 db.refresh(existing_questions)
             else:
@@ -474,14 +488,15 @@ def search_similar_chunks(
         chunks = []
         for result in results:
             if float(result.score) >= min_score:
+                payload = result.payload or {}
                 chunks.append({
-                    'text': result.payload.get('text'),
-                    'source_file': result.payload.get('source_file'),
-                    'document_type': result.payload.get('document_type'),
-                    'chunk_index': result.payload.get('chunk_index'),
-                    'total_chunks': result.payload.get('total_chunks'),
+                    'text': payload.get('text'),
+                    'source_file': payload.get('source_file'),
+                    'document_type': payload.get('document_type'),
+                    'chunk_index': payload.get('chunk_index'),
+                    'total_chunks': payload.get('total_chunks'),
                     'score': float(result.score),
-                    'metadata': result.payload
+                    'metadata': payload
                 })
         
         log.info(
@@ -764,12 +779,10 @@ def _generate_with_retry(
             if conversation_history:
                 # 1. Map and format the history list for the Gemini API
                 history_for_gemini = [
-                    {
-                        # Use the helper function to ensure valid roles
-                        "role": _map_role_for_gemini(msg["role"]), 
-                        # Use "text" key inside parts, as required by the API's Content object format
-                        "parts": [{"text": msg["content"]}] 
-                    } 
+                    Content(
+                        role=_map_role_for_gemini(msg["role"]),
+                        parts=[Part(text=msg["content"])]
+                    )
                     for msg in conversation_history
                 ]
                 
@@ -820,20 +833,19 @@ def get_chatbot_responses_service(
         raise HTTPException(status_code=404, detail="Chatbot not found")
 
     # Total count
-    total = db.query(Answer).filter(
-        Answer.chatbot_id == chatbot_id
-    ).count()
+    total = db.query(Answer).filter(Answer.chatbot_id == chatbot_id).count()
 
     # Main query (LATEST FIRST)
+    # Use outerjoin to include answers even without linked employees
     results = (
         db.query(
             Answer,
-            Employee.id.label("employee_id"),
-            Employee.name.label("employee_name"),
-            Employee.email.label("employee_email"),
-            Employee.role.label("employee_role")
+            Employee.employee_id.label("employee_id"),
+            Employee.employee_name.label("employee_name"),
+            Employee.employee_email.label("employee_email"),
+            Employee.employee_role.label("employee_role")
         )
-        .join(Employee, Employee.id == Answer.employee_id)
+        .outerjoin(Employee, Employee.employee_id == Answer.attempter_by_id)
         .filter(Answer.chatbot_id == chatbot_id)
         .order_by(Answer.created_at.desc())
         .offset(skip)
@@ -843,20 +855,40 @@ def get_chatbot_responses_service(
 
     response_list = []
     for row in results:
-        quiz, emp_id, emp_name, emp_email, emp_role = row
+        answer, emp_id, emp_name, emp_email, emp_role = row
 
-        response_list.append({
-            "response_id": str(quiz.id),
-            "submitted_at": quiz.created_at,
-            "last_question_answered": quiz.last_question,
-            "answers": quiz.answers,
+        # Extract answer data - this is the actual quiz/form responses
+        answer_data = answer.answer_data if hasattr(answer, 'answer_data') else {}
+        chat_history = answer.chat_history if hasattr(answer, 'chat_history') else None
+        
+        # Flatten the response to include all possible answer fields
+        # Some records store answers in nested structures
+        response_item = {
+            "response_id": str(answer.id),
+            "submitted_at": answer.created_at.isoformat() if hasattr(answer.created_at, 'isoformat') else None,
+            "answer_data": answer_data,  # Full answer payload (JSONB field)
+            "chat_history": chat_history,  # Chat context if available
             "employee": {
-                "id": str(emp_id),
+                "id": emp_id,
                 "name": emp_name,
                 "email": emp_email,
                 "role": emp_role
-            }
-        })
+            } if emp_id else None
+        }
+        
+        # If answer_data is a dict, merge its top-level keys into the response for easier access
+        if isinstance(answer_data, dict):
+            # Add commonly used fields at the top level for convenience
+            if 'answers' in answer_data:
+                response_item['answers'] = answer_data['answers']
+            if 'skipped' in answer_data:
+                response_item['skipped'] = answer_data['skipped']
+            if 'submission_time' in answer_data:
+                response_item['submission_time'] = answer_data['submission_time']
+            if 'total_questions' in answer_data:
+                response_item['total_questions'] = answer_data['total_questions']
+        
+        response_list.append(response_item)
 
     return {
         "total": total,

@@ -39,7 +39,7 @@ async def create_chatbot(
     meta_data: Optional[str] = Form(None, description="JSON metadata"),
     documents: List[UploadFile] = File(..., description="Documents (PDF, DOCX, DOC, TXT, RTF)"),
     mode: Optional[str] = Form("general", description="Chatbot mode (e.g., general, quiz, hybrid)"),
-    questions: Optional[dict] = Form(None, description="Quiz questions if in quiz mode"),
+    questions: Optional[str] = Form(None, description="Quiz questions if in quiz mode"),
     db: Session = Depends(get_db),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
@@ -55,11 +55,12 @@ async def create_chatbot(
     **Note:** Chatbot names must be unique.
     """
     
-    log.info(f"Received request to create chatbot: {chatbot_name}")
+    log.info(f"Received request to create chatbot: {questions}")
     
     doc_contents: List[bytes] = []
     doc_names: List[str] = []
     
+
     # Parse metadata
     meta_data_dict = {}
     if meta_data:
@@ -107,6 +108,14 @@ async def create_chatbot(
             raise HTTPException(status_code=400, detail="Invalid UUID format for generated_by")
     
     # Create chatbot
+    parsed_questions = None
+
+    if questions:
+        try:
+            parsed_questions = json.loads(questions)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON in questions")
+
     try:
         chatbot = create_chatbot_service(
             db=db,
@@ -119,7 +128,7 @@ async def create_chatbot(
             generated_by=generated_by_uuid,
             meta_data=meta_data_dict,
             mode=mode,
-            questions=questions,
+            questions=parsed_questions,
             background_tasks=background_tasks
         )
         
@@ -269,7 +278,7 @@ async def get_chatbot(
         
         questions_data = None
 
-        if chatbot.mode == "quiz":
+        if chatbot.mode in ("quiz", "people_analyzer"):
             log.info(f"Fetching quiz chatbot: {chatbot.chatbot_name}")
             questions = db.query(Question).filter(Question.chatbot_id == chatbot.chatbot_id).first()
             print(questions)
@@ -462,19 +471,43 @@ async def submit_quiz_answers(
     """
     try:
         log.info(f"Submitting quiz for chatbot: {chatbot_id}, answers count: {len(answers)}")
-        
+
         # Validate chatbot exists
         chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
         if not chatbot:
             raise HTTPException(status_code=404, detail=f"Chatbot '{chatbot_id}' not found")
-        
-            # Save to database
-        from stateful_services.db_schema import Answer
+
+        # Save to database
+        from stateful_services.db_schema import Answer, PeopleAnalyzer
         from datetime import datetime
-        # Prepare answer data
-        
-    
-        
+
+        # If this chatbot is configured as a people analyzer, store submissions in PeopleAnalyzer
+        try:
+            mode = str(chatbot.mode).lower() if getattr(chatbot, 'mode', None) is not None else ''
+        except Exception:
+            mode = ''
+
+        if mode == 'people_analyzer' or mode == 'people-analyzer' or (isinstance(chatbot.meta_data, dict) and chatbot.meta_data.get('analyzer') == 'people'):
+            pa = PeopleAnalyzer(
+                id=uuid.uuid4(),
+                chatbot_id=uuid.UUID(chatbot_id),
+                employee_id=None,
+                answers=answers,
+                created_by=None
+            )
+            db.add(pa)
+            db.commit()
+            db.refresh(pa)
+
+            log.info(f"PeopleAnalyzer submission stored with ID: {pa.id}")
+            return {
+                "message": "People analyzer submission stored",
+                "people_analyzer_id": str(pa.id),
+                "chatbot_id": chatbot_id,
+                "answers_submitted": len(answers)
+            }
+
+        # Default: store as regular Answer record
         new_answer = Answer(
             id=uuid.uuid4(),
             chatbot_id=uuid.UUID(chatbot_id),
@@ -482,21 +515,19 @@ async def submit_quiz_answers(
             attempter_by_id=None,  # Will be set if user authentication is available
             chat_history=[]
         )
-        
+
         db.add(new_answer)
         db.commit()
         db.refresh(new_answer)
-        
+
         log.info(f"Quiz submitted successfully with ID: {new_answer.id}")
-        
+
         return {
             "message": "Quiz submitted successfully",
             "quiz_id": str(new_answer.id),
             "chatbot_id": chatbot_id,
-            "answers_submitted": len(answers),
-            "submission_time": answer_data["submission_time"]
+            "answers_submitted": len(answers)
         }
-        
     except HTTPException:
         raise
     except Exception as e:
@@ -638,6 +669,36 @@ def get_chatbot_responses(
     Latest responses are returned first.
     """
 
+    try:
+        chatbot_uuid = uuid.UUID(chatbot_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid chatbot_id UUID")
+
+    responses = get_chatbot_responses_service(
+        db=db,
+        chatbot_id=chatbot_uuid,
+        skip=skip,
+        limit=limit
+    )
+
+    return {
+        "chatbot_id": chatbot_id,
+        "total": responses["total"],
+        "responses": responses["data"]
+    }
+
+
+@router.get("/responses", summary="View chatbot quiz responses by query param (alias)")
+def get_chatbot_responses_query(
+    chatbot_id: str = Query(..., description="UUID of the chatbot"),
+    skip: int = 0,
+    limit: int = 10,
+    db: Session = Depends(get_db)
+):
+    """Alias endpoint to support frontend callers that pass `chatbot_id` as a query parameter.
+
+    Example: /responses?chatbot_id=<uuid>&skip=0&limit=10
+    """
     try:
         chatbot_uuid = uuid.UUID(chatbot_id)
     except ValueError:
