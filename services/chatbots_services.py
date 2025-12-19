@@ -779,13 +779,12 @@ def _generate_with_retry(
             if conversation_history:
                 # 1. Map and format the history list for the Gemini API
                 history_for_gemini = [
-                    Content(
-                        role=_map_role_for_gemini(msg["role"]),
-                        parts=[Part(text=msg["content"])]
-                    )
+                    {
+                        "role": _map_role_for_gemini(msg["role"]),
+                        "parts": [msg["content"]]  # Just the string in a list
+                    }
                     for msg in conversation_history
                 ]
-                
                 # 2. Start chat with the corrected history
                 chat = model.start_chat(history=history_for_gemini)
                 return chat.send_message(prompt)

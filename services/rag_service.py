@@ -4,7 +4,7 @@ Handles query processing, embedding search, and response generation
 """
 from typing import List, Dict, Optional
 import logging
-from services.embedding_service import get_embedding_service
+from utils.embedding import _generate_gemini_embedding
 from services.pipeline import get_system_prompt, Mode
 # from services.qdrant_service import get_qdrant_service
 import google.generativeai as genai
@@ -16,7 +16,8 @@ class RAGService:
     """Service for retrieval-augmented generation"""
     
     def __init__(self):
-        self.embedding_service = get_embedding_service()
+        
+        self.embedding_service = _generate_gemini_embedding()
         # self.qdrant_service = get_qdrant_service()
         genai.configure(api_key=config.GEMINI_API_KEY)
     
