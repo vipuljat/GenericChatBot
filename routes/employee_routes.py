@@ -439,3 +439,114 @@ def update_employee_service(
             status_code=500,
             detail=f"Failed to update employee: {str(e)}",
         )
+        
+        ##upload employee 
+@router.post("/employees/create", tags=["Employees"], summary="Create a new employee")
+def create_employee(
+    request: Request,
+    employee_id: str = Form(...),
+    employee_name: str = Form(...),
+    employee_email: Optional[str] = Form(None),
+    employee_role: str = Form("employee"),
+    department: Optional[str] = Form(None),
+    meta_data: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+):
+    """
+    Create a new employee (admin only).
+    """
+
+    admin = require_admin(request, db)
+
+    log.info(f"Admin {admin.employee_email} creating employee {employee_id}")
+
+    meta_data_dict = None
+    if meta_data:
+        try:
+            meta_data_dict = json.loads(meta_data)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON format in meta_data")
+
+    employee = create_employee_service(
+        db=db,
+        employee_id=employee_id,
+        employee_name=employee_name,
+        employee_email=employee_email,
+        employee_role=employee_role,
+        department=department,
+        meta_data=meta_data_dict,
+    )
+
+    return {
+        "status": "success",
+        "message": "Employee created successfully",
+        "employee": {
+            "id": str(employee.id),
+            "employee_id": employee.employee_id,
+            "employee_name": employee.employee_name,
+            "employee_email": employee.employee_email,
+            "employee_role": employee.employee_role,
+            "department": employee.department,
+            "created_at": employee.created_at.isoformat() if hasattr(employee.created_at, "isoformat") else None,
+        },
+        "created_by": admin.employee_email,
+    }
+
+
+def create_employee_service(
+    db: Session,
+    employee_id: str,
+    employee_name: str,
+    employee_email: Optional[str],
+    employee_role: str,
+    department: Optional[str],
+    meta_data: Optional[Dict[str, Any]],
+) -> Employee:
+    """
+    Create a new employee safely.
+    """
+
+    try:
+        # Check employee_id uniqueness
+        if db.query(Employee).filter(Employee.employee_id == employee_id).first():
+            raise HTTPException(
+                status_code=400,
+                detail="Employee with this employee_id already exists",
+            )
+
+        # Check email uniqueness
+        if employee_email:
+            if db.query(Employee).filter(
+                Employee.employee_email == employee_email
+            ).first():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Employee with this email already exists",
+                )
+
+        employee = Employee(
+            employee_id=employee_id,
+            employee_name=employee_name,
+            employee_email=employee_email,
+            employee_role=employee_role,
+            department=department,
+            meta_data=meta_data or {},
+        )
+
+        db.add(employee)
+        db.commit()
+        db.refresh(employee)
+
+        log.info(f"Employee created successfully: {employee.employee_email}")
+        return employee
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        log.error(f"Failed to create employee {employee_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create employee: {str(e)}",
+        )
+

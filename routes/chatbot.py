@@ -29,6 +29,16 @@ from utils.logging import log
 router = APIRouter()
 
 
+# Pydantic models for request validation
+class QuizAnswerItem(BaseModel):
+    question_id: str
+    answer: str
+
+class SubmitQuizRequest(BaseModel):
+    chatbot_id: str
+    answers: List[Dict[str, Any]]
+
+
 @router.post("/create", summary="Create a chatbot with multiple documents")
 async def create_chatbot(
     chatbot_name: str = Form(..., description="Unique name for the chatbot"),
@@ -442,14 +452,15 @@ async def delete_chatbot(
         raise HTTPException(status_code=500, detail=f"Error deleting chatbot: {str(e)}")
 
 
-@router.post("/submit-quiz", summary="Submit quiz answers")
+@router.post("/submit-quiz", summary="Submit quiz answers (Normal Chatbot Only)")
 async def submit_quiz_answers(
-    chatbot_id: str = Body(...),
-    answers: List[Dict[str, Any]] = Body(...),
+    payload: SubmitQuizRequest,
     db: Session = Depends(get_db)
 ):
     """
-    Submit all quiz answers at once.
+    Submit quiz answers for NORMAL chatbots only (stores in Answer table).
+    
+    ⚠️ For People Analyzer chatbots, use: POST /api/people-analyzer/review/submit
     
     **Parameters:**
     - **chatbot_id**: UUID of the chatbot
@@ -470,6 +481,9 @@ async def submit_quiz_answers(
     - Confirmation with submission details
     """
     try:
+        chatbot_id = payload.chatbot_id
+        answers = payload.answers
+        
         log.info(f"Submitting quiz for chatbot: {chatbot_id}, answers count: {len(answers)}")
 
         # Validate chatbot exists
@@ -477,37 +491,22 @@ async def submit_quiz_answers(
         if not chatbot:
             raise HTTPException(status_code=404, detail=f"Chatbot '{chatbot_id}' not found")
 
-        # Save to database
-        from stateful_services.db_schema import Answer, PeopleAnalyzer
-        from datetime import datetime
-
-        # If this chatbot is configured as a people analyzer, store submissions in PeopleAnalyzer
+        # Check if this is a people_analyzer chatbot - reject and redirect
         try:
             mode = str(chatbot.mode).lower() if getattr(chatbot, 'mode', None) is not None else ''
         except Exception:
             mode = ''
 
         if mode == 'people_analyzer' or mode == 'people-analyzer' or (isinstance(chatbot.meta_data, dict) and chatbot.meta_data.get('analyzer') == 'people'):
-            pa = PeopleAnalyzer(
-                id=uuid.uuid4(),
-                chatbot_id=uuid.UUID(chatbot_id),
-                employee_id=None,
-                answers=answers,
-                created_by=None
+            raise HTTPException(
+                status_code=400,
+                detail="This is a People Analyzer chatbot. Please use POST /api/people-analyzer/review/submit instead."
             )
-            db.add(pa)
-            db.commit()
-            db.refresh(pa)
 
-            log.info(f"PeopleAnalyzer submission stored with ID: {pa.id}")
-            return {
-                "message": "People analyzer submission stored",
-                "people_analyzer_id": str(pa.id),
-                "chatbot_id": chatbot_id,
-                "answers_submitted": len(answers)
-            }
+        # Save to Answer table for normal chatbots
+        from stateful_services.db_schema import Answer
+        from datetime import datetime
 
-        # Default: store as regular Answer record
         new_answer = Answer(
             id=uuid.uuid4(),
             chatbot_id=uuid.UUID(chatbot_id),
