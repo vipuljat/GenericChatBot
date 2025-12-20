@@ -241,7 +241,7 @@ import config
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
 from stateful_services.db_schema import Chatbot, Question, Answer
-from services.chatbots_services import get_chatbot_context, _generate_with_retry
+from services.rag_service import retrieve_context, generate_with_retry
 from utils.logging import log
 import json
 import re
@@ -681,7 +681,7 @@ def _handle_clarification_question(
     """
     try:
         # Get relevant context from chatbot's knowledge base
-        context = get_chatbot_context(
+        context = retrieve_context(
             chatbot_name=chatbot_name,
             query=query,
             max_context_length=2000,
@@ -710,7 +710,7 @@ Be encouraging and guide them to think through the question themselves.
 Keep your response concise (2-3 sentences max).
 """
         
-        response_obj = _generate_with_retry(
+        response_obj = generate_with_retry(
             prompt=prompt,
             conversation_history=conversation_history[-3:] if len(conversation_history) > 3 else conversation_history,
             model_name=config.GEMINI_MODEL,

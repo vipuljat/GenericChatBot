@@ -5,7 +5,7 @@ from fastapi import UploadFile
 from typing import Optional, List
 import logging
 from services.document_service import get_document_service
-from services.embedding_service import get_embedding_service
+# from services.embedding_service import get_embedding_service
 # from services.qdrant_service import get_qdrant_service
 
 logger = logging.getLogger(__name__)
@@ -15,7 +15,7 @@ class ChatbotService:
     
     def __init__(self):
         self.document_service = get_document_service()
-        self.embedding_service = get_embedding_service()
+        # self.embedding_service = get_embedding_service()
         # self.qdrant_service = get_qdrant_service()
     
     def _process_and_store_embeddings(
