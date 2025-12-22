@@ -10,11 +10,12 @@ Refactored Chatbot Service - FUNCTIONAL APPROACH
 
 import uuid
 from typing import List, Optional, Dict, Any
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, BackgroundTasks
 from qdrant_client.models import PointStruct
 
-from stateful_services.db_schema import Chatbot, Question
+from stateful_services.db_schema import Answer, Chatbot, Employee, PeopleAnalyzer, Question
 from utils.document_service import extract_text_from_document, get_file_extension
 from utils.logging import log
 
@@ -326,3 +327,233 @@ def delete_chatbot_by_id(db: Session, chatbot_id: uuid.UUID) -> bool:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def get_chatbot_responses_service(
+    chatbot_id: uuid.UUID,
+    department: Optional[str],
+    db: Session
+) -> Dict[str, Any]:
+    """Main service to route based on mode."""
+    chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
+    if not chatbot:
+        raise HTTPException(status_code=404, detail="Chatbot not found")
+
+    if chatbot.mode == "quiz":
+        return get_quiz_responses(chatbot_id, db)
+    elif chatbot.mode == "people_analyzer":
+        return get_people_analyzer_responses(chatbot_id, department, db)
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported chatbot mode")
+
+
+def get_quiz_responses(chatbot_id: uuid.UUID, db: Session) -> Dict[str, Any]:
+    """Get all quiz attempts with question text and options in answers."""
+    
+    # Fetch active questions to get text and options
+    questions_raw = db.query(Question)\
+        .filter(Question.chatbot_id == chatbot_id, Question.status == "active")\
+        .all()
+
+    # Build question map: id -> {text, options}
+    question_map = {}
+    for q in questions_raw:
+        data_list = q.question_data
+        if isinstance(data_list, list):
+            for item in data_list:
+                qid = item.get("id")
+                if qid is not None:
+                    question_map[qid] = {
+                        "text": item.get("text"),
+                        "options": item.get("options", []),
+                        "type": item.get("type", "mcq")
+                    }
+
+    # Fetch attempts
+    attempts = db.query(Answer)\
+        .filter(Answer.chatbot_id == chatbot_id)\
+        .order_by(Answer.created_at.desc())\
+        .all()
+
+    if not attempts:
+        return {
+            "mode": "quiz",
+            "chatbot_id": str(chatbot_id),
+            "total_attempts": 0,
+            "attempts": []
+        }
+
+    formatted_attempts = []
+
+    for attempt in attempts:
+        answers_data = attempt.answer_data or {}
+        employee = db.query(Employee)\
+            .filter(Employee.employee_id == attempt.attempter_by_id)\
+            .first()
+
+        detailed_answers = []
+        attempted_count = 0
+
+        for q_id_str, ans_obj in answers_data.items():
+            try:
+                q_id = int(q_id_str)
+            except:
+                continue
+
+            answer_value = ans_obj.get("answer") if isinstance(ans_obj, dict) else ans_obj
+            is_skipped = answer_value == "skipped" or (isinstance(ans_obj, dict) and ans_obj.get("answer") == "skipped")
+
+            question_info = question_map.get(q_id, {"text": f"Question {q_id}", "options": [], "type": "mcq"})
+
+            detailed_answers.append({
+                "question_id": q_id,
+                "question_text": question_info["text"],
+                "type": question_info["type"],
+                "options": question_info["options"],
+                "selected_answer": "Skipped" if is_skipped else answer_value
+            })
+
+            if not is_skipped:
+                attempted_count += 1
+
+        # Sort by question_id
+        detailed_answers.sort(key=lambda x: x["question_id"])
+
+        formatted_attempts.append({
+            "attempt_id": str(attempt.id),
+            "employee_id": attempt.attempter_by_id  ,
+            "employee_name": employee.employee_name if employee else "Unknown",
+            "department": employee.department if employee else None,
+            "attempted_count": attempted_count,
+            "total_questions": len(answers_data),
+            "answers": detailed_answers,
+            "created_at": attempt.created_at.isoformat()
+        })
+
+    return {
+        "mode": "quiz",
+        "chatbot_id": str(chatbot_id),
+        "total_attempts": len(formatted_attempts),
+        "attempts": formatted_attempts
+    }
+def get_people_analyzer_responses(
+    chatbot_id: uuid.UUID,
+    department: Optional[str],
+    db: Session
+) -> Dict[str, Any]:
+    """Aggregated responses for people_analyzer with overall average rating."""
+    
+    # Fetch questions
+    questions_raw = db.query(Question)\
+        .filter(Question.chatbot_id == chatbot_id, Question.status == "active")\
+        .all()
+
+    questions = []
+    for q in questions_raw:
+        data_list = q.question_data
+        if isinstance(data_list, list):
+            for item in data_list:
+                questions.append({
+                    "id": item.get("id"),
+                    "text": item.get("text"),
+                    "category": item.get("category"),
+                    "order": item.get("order", 999)
+                })
+        else:
+            questions.append({
+                "id": data_list.get("id"),
+                "text": data_list.get("text"),
+                "category": data_list.get("category"),
+                "order": data_list.get("order", 999)
+            })
+
+    questions.sort(key=lambda x: x.get("order", 999))
+
+    # Fetch ratings
+    query = db.query(PeopleAnalyzer, Employee.employee_name, Employee.department)\
+        .join(Employee, PeopleAnalyzer.employee_id == Employee.employee_id)\
+        .filter(PeopleAnalyzer.chatbot_id == chatbot_id)
+
+    if department:
+        query = query.filter(Employee.department.ilike(f"%{department}%"))
+
+    entries = query.all()
+
+    if not entries:
+        return {
+            "mode": "people_analyzer",
+            "chatbot_id": str(chatbot_id),
+            "questions": questions,
+            "filters_applied": {"department": department},
+            "aggregated_data": []
+        }
+
+    # Group by rated employee
+    grouped: Dict[str, Dict] = {}
+
+    for entry, employee_name, emp_department in entries:
+        emp_id = entry.employee_id
+        if emp_id not in grouped:
+            grouped[emp_id] = {
+                "employee_id": emp_id,
+                "employee_name": employee_name or "Unknown",
+                "department": emp_department or "Unknown",
+                "total_ratings": 0,
+                "question_stats": {},
+                "total_sum": 0,
+                "total_count": 0
+            }
+
+        grouped[emp_id]["total_ratings"] += 1
+
+        answers = entry.answers or {}
+        for q_id_str, ans_obj in answers.items():
+            answer = ans_obj.get("answer") if isinstance(ans_obj, dict) else ans_obj
+            if answer == "skipped" or answer is None:
+                continue
+
+            if q_id_str not in grouped[emp_id]["question_stats"]:
+                grouped[emp_id]["question_stats"][q_id_str] = {"sum": 0, "count": 0}
+
+            score = {"+": 1, "-": -1, "+-": 0}.get(str(answer).strip(), 0)
+            grouped[emp_id]["question_stats"][q_id_str]["sum"] += score
+            grouped[emp_id]["question_stats"][q_id_str]["count"] += 1
+
+            # Add to overall total
+            grouped[emp_id]["total_sum"] += score
+            grouped[emp_id]["total_count"] += 1
+
+    # Final aggregation
+    aggregated_data = []
+    for emp_id, data in grouped.items():
+        question_averages = {}
+        for q_id, stats in data["question_stats"].items():
+            avg = stats["sum"] / stats["count"] if stats["count"] > 0 else 0
+            question_averages[q_id] = {
+                "average": round(avg, 2),
+                "count": stats["count"]
+            }
+
+        overall_average = (
+            round(data["total_sum"] / data["total_count"], 2)
+            if data["total_count"] > 0
+            else 0
+        )
+
+        aggregated_data.append({
+            "employee_id": data["employee_id"],
+            "employee_name": data["employee_name"],
+            "department": data["department"],
+            "total_ratings": data["total_ratings"],
+            "overall_average": overall_average,  # New field
+            "question_averages": question_averages
+        })
+
+    # Sort by overall_average descending (highest rated first)
+    aggregated_data.sort(key=lambda x: x["overall_average"], reverse=True)
+
+    return {
+        "mode": "people_analyzer",
+        "chatbot_id": str(chatbot_id),
+        "questions": questions,
+        "filters_applied": {"department": department},
+        "aggregated_data": aggregated_data
+    }

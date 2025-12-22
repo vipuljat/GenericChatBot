@@ -7,72 +7,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Body, Form
 from sqlalchemy.orm import Session
 from stateful_services.database import get_db
 from stateful_services.db_schema import Employee
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 import uuid
 import json
-import os
 from utils.logging import log
+from utils.token_decode import get_current_employee_from_token
 
 
 router = APIRouter()
-
-
-# ======================================================
-# AUTH HELPERS (TEMP DISABLE VIA ENV FLAG)
-# ======================================================
-
-def get_current_employee_from_token(request: Request, db: Session) -> Employee:
-    """
-    Extract and verify current employee from auth token.
-    TEMP: Auth can be disabled via DISABLE_EMPLOYEE_AUTH=true
-    """
-
-    # 🔴 TEMP AUTH BYPASS
-    if os.getenv("DISABLE_EMPLOYEE_AUTH", "").lower() == "true":
-        log.warning("⚠️ Employee auth is DISABLED via DISABLE_EMPLOYEE_AUTH flag")
-        employee = db.query(Employee).first()
-        if not employee:
-            raise HTTPException(
-                status_code=500,
-                detail="Auth disabled but no employees found in database"
-            )
-        return employee
-    # 🔴 END AUTH BYPASS
-
-    try:
-        auth_header = request.headers.get("Authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="Not authenticated")
-
-        token = auth_header.replace("Bearer ", "")
-
-        from auth.auth_service import MicrosoftAuthService
-        auth_service = MicrosoftAuthService()
-        payload = auth_service.verify_jwt_token(token)
-
-        if not payload:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-        email = payload.get("email")
-        if not email:
-            raise HTTPException(status_code=401, detail="Invalid token payload")
-
-        employee = db.query(Employee).filter(
-            Employee.employee_email == email
-        ).first()
-
-        if not employee:
-            raise HTTPException(status_code=404, detail="Employee not found")
-
-        return employee
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Authentication error: {str(e)}"
-        )
 
 
 def require_admin(request: Request, db: Session) -> Employee:
@@ -92,12 +34,11 @@ def require_admin(request: Request, db: Session) -> Employee:
 
 # ===================== ROUTES =====================
 
-@router.get("/employees", tags=["Employees"])
+@router.get("/employees")
 def list_employees(
-    request: Request,
     db: Session = Depends(get_db),
-    role: Optional[str] = None
-):
+    role: Optional[str] = None,
+    department: Optional[str] = None):
     """List all employees (admin only)."""
 
     # require_admin(request, db)
@@ -105,28 +46,18 @@ def list_employees(
     query = db.query(Employee)
     if role:
         query = query.filter(Employee.employee_role == role)
+    if department:
+        query = query.filter(Employee.department == department)
 
     employees = query.all()
 
     return {
         "total": len(employees),
-        "employees": [
-            {
-                "id": str(emp.id),
-                "employee_id": emp.employee_id,
-                "employee_name": emp.employee_name,
-                "employee_email": emp.employee_email,
-                "employee_role": emp.employee_role,
-                "department": emp.department,
-                "created_at": emp.created_at.isoformat() if hasattr(emp.created_at, "isoformat") else None,
-                "updated_at": emp.updated_at.isoformat() if hasattr(emp.updated_at, "isoformat") else None,
-            }
-            for emp in employees
-        ],
+        "employees": [employees]
     }
 
 
-@router.get("/employees/{employee_id}", tags=["Employees"])
+@router.get("/employees/{employee_id}")
 def get_employee(
     request: Request,
     employee_id: uuid.UUID,
@@ -154,7 +85,7 @@ def get_employee(
     }
 
 
-@router.put("/employees/{employee_id}/role", tags=["Employees"])
+@router.put("/employees/{employee_id}/role")
 def update_employee_role(
     request: Request,
     employee_id: uuid.UUID,
@@ -213,7 +144,7 @@ def update_employee_role(
 
 
 
-@router.put("/employees/{employee_id}", tags=["Employees"])
+@router.put("/employees/{employee_id}")
 def update_employee(
     request: Request,
     employee_id: uuid.UUID,
@@ -289,7 +220,7 @@ def update_employee(
     }
 
 
-@router.get("/me", tags=["Employees"])
+@router.get("/me")
 def get_current_employee(
     request: Request,
     db: Session = Depends(get_db)
@@ -441,7 +372,7 @@ def update_employee_service(
         )
         
         ##upload employee 
-@router.post("/employees/create", tags=["Employees"], summary="Create a new employee")
+@router.post("/employees/create", summary="Create a new employee")
 def create_employee(
     request: Request,
     employee_id: str = Form(...),

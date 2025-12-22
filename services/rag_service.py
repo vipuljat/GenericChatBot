@@ -93,13 +93,66 @@ def map_role_to_gemini(role: str) -> str:
     return 'user'
 
 
+# def generate_with_retry(
+#     prompt: str,
+#     conversation_history: List[Dict[str, str]],
+#     model_name: str,
+#     max_retries: int = 3
+# ):
+#     """Generate response with retry logic for rate limits."""
+#     backoff = 2
+#     last_error = None
+    
+#     for attempt in range(1, max_retries + 1):
+#         try:
+#             model = genai.GenerativeModel(model_name)
+            
+#             if conversation_history:
+#                 history = [
+#                     {
+#                         "role": map_role_to_gemini(msg["role"]),
+#                         "parts": [msg["content"]]
+#                     }
+#                     for msg in conversation_history
+#                 ]
+#                 chat = model.start_chat(history=history)
+#                 return chat.send_message(prompt)
+            
+#             return model.generate_content(prompt)
+        
+#         except Exception as e:
+#             last_error = e
+#             msg = str(e)
+            
+#             if ("429" in msg or "quota" in msg.lower() or "rate" in msg.lower()) and attempt < max_retries:
+#                 log.warning(f"⚠️  Rate limit (attempt {attempt}), retrying in {backoff}s")
+#                 time.sleep(backoff)
+#                 backoff *= 2
+#                 continue
+            
+#             break
+    
+#     raise last_error or RuntimeError("Generation failed after retries")
+
+
 def generate_with_retry(
     prompt: str,
     conversation_history: List[Dict[str, str]],
     model_name: str,
     max_retries: int = 3
 ):
-    """Generate response with retry logic for rate limits."""
+    """
+    Generate response with retry logic and automatic cost tracking.
+    
+    Args:
+        prompt: The prompt to send to the model
+        conversation_history: Previous conversation messages
+        model_name: Model identifier (e.g., gemini-1.5-pro)
+        max_retries: Maximum retry attempts for rate limits
+        
+    Returns:
+        Model response object with .text attribute
+    """
     backoff = 2
     last_error = None
     
@@ -116,9 +169,15 @@ def generate_with_retry(
                     for msg in conversation_history
                 ]
                 chat = model.start_chat(history=history)
-                return chat.send_message(prompt)
+                response = chat.send_message(prompt)
+            else:
+                response = model.generate_content(prompt)
             
-            return model.generate_content(prompt)
+            # Calculate and log cost
+            cost = estimate_llm_cost(prompt, response.text, model_name)
+    
+            
+            return response
         
         except Exception as e:
             last_error = e

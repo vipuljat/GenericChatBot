@@ -183,7 +183,7 @@ def skip_question(request: Request, chatbot_id: uuid.UUID, body: dict, db: Sessi
     return skip_question_service(chatbot_id, question_id, body, employee_details, db)
 
 
-@router.get("/chatbot/{chatbot_id}", tags=["Answers"])
+@router.get("/responses/{chatbot_id}",)
 def get_chatbot_answers(
     chatbot_id: uuid.UUID,
     source_type: Optional[str] = None,

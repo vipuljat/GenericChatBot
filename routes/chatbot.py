@@ -1,23 +1,26 @@
 from typing import List, Optional, Dict, Any
 import uuid
 import json
-from fastapi import APIRouter, Depends, UploadFile, File, Form, BackgroundTasks, HTTPException, Query, Body
+from fastapi import APIRouter, Depends, Request, UploadFile, File, Form, BackgroundTasks, HTTPException, Query, Body
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from agent.agent import render_quiz_questions
 from stateful_services.database import get_db
-from stateful_services.db_schema import Chatbot, Question, Answer
+from stateful_services.db_schema import Chatbot, PeopleAnalyzer, Question, Answer
 from utils.document_service import is_supported_document, get_supported_extensions
 from utils.logging import log
 
 # Import functional services
 from services.chatbots_services import (
     create_chatbot,
+    get_chatbot_responses_service,
     update_chatbot,
     delete_chatbot_by_id
 )
 from services.rag_service import generate_rag_response
 from services.quiz_services import quiz_query_service
+from utils.token_decode import get_current_employee_from_token
 
 router = APIRouter()
 
@@ -31,6 +34,7 @@ class QueryRequest(BaseModel):
     instructions: Optional[str] = None
     history: Optional[List[dict]] = None
     user_id: Optional[str] = None
+    employee_id: Optional[str] = None
 
 
 class ChatbotUpdate(BaseModel):
@@ -42,7 +46,9 @@ class ChatbotUpdate(BaseModel):
 
 class SubmitQuizRequest(BaseModel):
     chatbot_id: str
-    answers: List[Dict[str, Any]]
+    answers: Dict[str, Any] = {}
+    employee_id: Optional[str] = None
+    user_id: Optional[str] = None
 
 
 # ============================================================================
@@ -189,7 +195,8 @@ async def list_chatbots(
                 "status": c.status,
                 "description": c.description,
                 "mode": c.mode,
-                "document_count": len(c.pdf_names) if c.pdf_names else 0
+                "document_count": len(c.pdf_names) if c.pdf_names else 0,
+                "document_names": c.pdf_names or []
             }
             for c in chatbots
         ]
@@ -226,6 +233,7 @@ async def get_chatbot_endpoint(
         "instruction": chatbot.instruction,
         "mode": chatbot.mode,
         "document_count": len(chatbot.pdf_names) if chatbot.pdf_names else 0,
+        "document_names": chatbot.pdf_names or [],
         "questions": questions_data,
         "meta_data": chatbot.meta_data
     }
@@ -243,8 +251,13 @@ async def query_chatbot_endpoint(
 ):
     """
     Universal query endpoint.
-    Routes to RAG or Quiz based on chatbot mode.
+    Routes to RAG, Quiz, or People Analyzer based on chatbot mode.
     ALL COSTS LOGGED AUTOMATICALLY.
+    
+    Modes:
+    - general: RAG-based question answering
+    - quiz: Interactive quiz assessments
+    - people_analyzer: People analysis with +/- ratings
     """
     
     # Validate chatbot
@@ -255,17 +268,25 @@ async def query_chatbot_endpoint(
     if not chatbot:
         raise HTTPException(status_code=404, detail="Chatbot not found")
     
-    chatbot_mode = str(chatbot.mode) if chatbot.mode else "general"
+    chatbot_mode = str(chatbot.mode).lower() if chatbot.mode else "general"
     
     log.info(f"🔍 Query for '{chatbot.chatbot_name}' ({chatbot_mode} mode)")
     
     # Route based on mode
-    if chatbot_mode == "quiz":
-        # Quiz mode
+    if chatbot_mode in ["quiz", "people_analyzer"]:
+        # Quiz or People Analyzer mode (use same service)
         user_id = None
+        employee_id = None
+        
         if request.user_id:
             try:
                 user_id = uuid.UUID(request.user_id)
+            except ValueError:
+                pass
+        
+        if request.employee_id:
+            try:
+                employee_id = uuid.UUID(request.employee_id)
             except ValueError:
                 pass
         
@@ -273,18 +294,20 @@ async def query_chatbot_endpoint(
             db=db,
             chatbot_id=chatbot_id,
             chatbot_name=chatbot.chatbot_name,
+            chatbot_mode=chatbot_mode,
             query=request.query,
             conversation_history=request.history or [],
-            user_id=user_id
+            user_id=user_id,
+            employee_id=employee_id
         )
         
         return {
-            "mode": "quiz",
+            "mode": chatbot_mode,
             "response": result["response"],
             "quiz_state": result.get("quiz_state", {}),
             "metadata": result.get("metadata", {})
         }
-    
+
     else:
         # General RAG mode (costs logged inside)
         result = generate_rag_response(
@@ -323,18 +346,40 @@ async def submit_quiz_endpoint(
     
     # Prevent people_analyzer submissions
     mode = str(chatbot.mode).lower() if chatbot.mode else ''
+    print("Chatbot mode:",mode)
     if mode in ['people_analyzer', 'people-analyzer']:
-        raise HTTPException(
-            status_code=400,
-            detail="Use /api/people-analyzer/review/submit for people analyzer"
+        new_answer = PeopleAnalyzer(
+            id=uuid.uuid4(),
+            chatbot_id=uuid.UUID(payload.chatbot_id),
+            answers=payload.answers,
+            created_by=payload.user_id,
+            employee_id=payload.employee_id
+        )
+    else:
+        new_answer = Answer(
+            id=uuid.uuid4(),
+            chatbot_id=uuid.UUID(payload.chatbot_id),
+            answer_data=payload.answers,
+            attempter_by_id=payload.user_id,
+            chat_history=[]
         )
     
+    db.add(new_answer)
+    db.commit()
+    db.refresh(new_answer)
+    
+    return {
+        "message": "Quiz submitted successfully",
+        "quiz_id": str(new_answer.id),
+        "chatbot_id": payload.chatbot_id,
+        "answers_submitted": len(payload.answers)
+    }
     # Save answer
     new_answer = Answer(
         id=uuid.uuid4(),
         chatbot_id=uuid.UUID(payload.chatbot_id),
         answer_data=payload.answers,
-        attempter_by_id=None,
+        attempter_by_id=payload.user_id,
         chat_history=[]
     )
     
@@ -364,53 +409,49 @@ async def get_supported_formats():
         "extensions": get_supported_extensions()
     }
     
-@router.post("/quiz/render")
+
+@router.post("/quiz/render", summary="Render quiz questions from document")
 async def upload_and_render_quiz_document(
-    file: UploadFile = File(...),
-    chatbot_id: str = Form(None),
-    db: Session = Depends(get_db)
+    file: UploadFile = File(..., description="Quiz document (PDF, DOCX, DOC, TXT, RTF)")
 ):
-    """
-    Upload and render quiz questions from a document.
-    """
+   
     try:
+        log.info(f" Quiz render request for: {file.filename}")
+        
+        # Render questions (no file storage)
         rendered_questions = await render_quiz_questions(file)
-
-        # If a chatbot_id was provided, persist rendered questions into questions table
-        if chatbot_id:
-            try:
-                cb_uuid = uuid.UUID(chatbot_id)
-            except Exception:
-                raise HTTPException(status_code=400, detail="Invalid chatbot_id UUID")
-
-            # Import stateful Chatbot and Question models to avoid model conflicts
-            from stateful_services.db_schema import Chatbot as StatefulChatbot, Question
-
-            chatbot = db.query(StatefulChatbot).filter(StatefulChatbot.chatbot_id == cb_uuid).first()
-            if not chatbot:
-                raise HTTPException(status_code=404, detail="Chatbot not found for provided chatbot_id")
-
-            # Persist each rendered question
-            persisted = []
-            for q in rendered_questions:
-                try:
-                    question = Question(chatbot_id=cb_uuid, question_data=q)
-                    db.add(question)
-                    persisted.append(question)
-                except Exception as e:
-                    # on error, continue with other questions but log
-                    import logging
-                    logging.getLogger(__name__).error(f"Failed to persist question: {e}")
-
-            if persisted:
-                db.commit()
-                for p in persisted:
-                    db.refresh(p)
-
-        return {
+        
+        result = {
             "file_name": file.filename,
             "total_questions": len(rendered_questions),
-            "questions": rendered_questions
+            "questions": rendered_questions,
+            "message": f"Successfully extracted {len(rendered_questions)} questions"
         }
+        
+        log.info(f"✅ Quiz render complete: {len(rendered_questions)} questions from {file.filename}")
+        
+        return result
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing document: {str(e)}")
+        log.error(f"Quiz render endpoint failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing document: {str(e)}"
+        )
+
+
+@router.get("/responses/{chatbot_id}")
+def get_chatbot_responses(
+    request: Request,
+    chatbot_id: uuid.UUID,
+    department: Optional[str] = None,  # New filter
+    db: Session = Depends(get_db),
+    
+):
+    """Get responses for a chatbot based on mode with optional department filter."""
+    # user_info = get_current_employee_from_token(request, db)
+    # print(user_info,"----------------------------------")
+    
+    return get_chatbot_responses_service(chatbot_id, department, db)

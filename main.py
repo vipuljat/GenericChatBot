@@ -7,12 +7,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html
 
-from routes.chatbot_routes import router as chatbot_router
 from routes.chatbot import router as chatbot
 from routes.auth_routes import router as auth_router
 from routes.employee_routes import router as employee_router
-from stateful_services.question import router as question_router
-from stateful_services.answer import router as answer_router
+# from stateful_services.question import router as question_router
+# from stateful_services.answer import router as answer_router
 from routes.people_analyzer_routes import router as people_analyzer_router
 from stateful_services.database import check_all_health
 from utils.logging import log
@@ -62,11 +61,8 @@ def create_app() -> FastAPI:
     )
     
     # Register routes
-    application.include_router(chatbot_router, prefix="/chatbot", tags=["Chatbot"])
     application.include_router(auth_router, prefix="/auth", tags=["Authentication"])
     application.include_router(chatbot, prefix="/chatbot/v2", tags=["Chatbot v2"])
-    application.include_router(question_router, prefix="/quiz", tags=["Questions"])
-    application.include_router(answer_router, prefix="/quiz", tags=["Answers"])
     application.include_router(people_analyzer_router)
     application.include_router(employee_router, prefix="/employees", tags=["Employees"])
 

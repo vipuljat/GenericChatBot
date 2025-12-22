@@ -10,7 +10,7 @@ import google.generativeai as genai
 import config
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
-from stateful_services.db_schema import Chatbot, Question, Answer
+from stateful_services.db_schema import Chatbot, PeopleAnalyzer, Question, Answer
 from utils.logging import log
 import re
 
@@ -61,6 +61,8 @@ Classify as ONE of these intents:
 4. "end_quiz" - User wants to end the quiz (e.g., "I'm done", "submit")
 
 Respond with ONLY ONE WORD: clarification_question, skip, answer, or end_quiz.
+
+NOTE: if user use +, _ or +-, it will be considered as answer.
 
 Examples:
 "explain" -> clarification_question
@@ -149,8 +151,7 @@ def get_quiz_session_from_history(conversation_history: List[Dict[str, str]]) ->
                             prev_msg = conversation_history[i-1]
                             if prev_msg.get("role") == "user":
                                 answers[str(answered_idx)] = {
-                                    "answer": prev_msg.get("content", ""),
-                                    "timestamp": datetime.utcnow().isoformat()
+                                    "answer": prev_msg.get("content", "")
                                 }
     
     state["current_index"] = current_index
@@ -169,7 +170,7 @@ def build_quiz_progress_summary(state: Dict[str, Any], total_questions: int) -> 
     current_index = state.get("current_index", 0)
     remaining = total_questions - current_index
     
-    return (f"📊 Progress: {answered} answered, {skipped_count} skipped, "
+    return (f" Progress: {answered} answered, {skipped_count} skipped, "
             f"{remaining} remaining out of {total_questions} total questions.")
 
 
@@ -180,7 +181,7 @@ def format_question_for_display(question: Dict[str, Any], index: int, total: int
     
     log.info(f"Formatting question {index}: type={q_type}, text_length={len(q_text)}")
     
-    formatted = f"\n📝 **Question {index + 1} of {total}**\n\n{q_text}\n"
+    formatted = f"\n Question {index + 1} of {total}**\n\n{q_text}\n"
     
     # If multiple choice, show options
     if q_type in ['mcq', 'multiple_choice'] and 'options' in question:
@@ -188,7 +189,7 @@ def format_question_for_display(question: Dict[str, Any], index: int, total: int
         for i, option in enumerate(question['options']):
             formatted += f"{chr(65 + i)}. {option}\n"
     
-    formatted += "\n💡 You can answer, skip, or ask for clarification about this question."
+    formatted += "\n You can answer, skip, or ask for clarification about this question."
     return formatted
 
 
@@ -284,15 +285,29 @@ Keep your response concise (2-3 sentences max).
 def handle_quiz_completion(
     db: Session,
     chatbot_id: str,
+    chatbot_mode: str,
     user_id: Optional[uuid.UUID],
+    employee_id: Optional[uuid.UUID],
     quiz_state: Dict[str, Any],
-    questions: List[Dict[str, Any]]
+    questions: List[Dict[str, Any]],
+    conversation_history: Optional[List[Dict[str, str]]] = None
 ) -> Dict[str, Any]:
     """
-    Handle quiz completion - save answers to database.
+    Handle quiz completion - save answers to appropriate table.
+    
+    Args:
+        chatbot_mode: "quiz" or "people_analyzer"
+        employee_id: For people_analyzer mode - person being analyzed
     """
     try:
+        
+        
         quiz_state["completed"] = True
+        
+           # Mark unanswered questions as "unmarked"
+        for idx in range(len(questions)):
+            if str(idx) not in quiz_state["answers"]:
+                quiz_state["answers"][str(idx)] = {"answer": "skipped"}
         
         # Prepare answer data
         answer_data = {
@@ -303,29 +318,44 @@ def handle_quiz_completion(
             "completion_time": datetime.utcnow().isoformat()
         }
        
-        # Save to database
-        new_answer = Answer(
-            id=uuid.uuid4(),
-            chatbot_id=uuid.UUID(chatbot_id),
-            answer_data=answer_data,
-            attempter_by_id=user_id,
-            chat_history=[]
-        )
-        
-        db.add(new_answer)
-        db.commit()
-        db.refresh(new_answer)
-        
-        log.info(f"✓ Quiz completed and saved with ID: {new_answer.id}")
-        
-        response = "Quiz completed! Your answers have been submitted successfully. Thank you!"
+        # Save based on mode
+        if chatbot_mode == "people_analyzer":
+            # Save to people_analyzer table
+            new_record = PeopleAnalyzer(
+                id=uuid.uuid4(),
+                chatbot_id=uuid.UUID(chatbot_id),
+                employee_id=employee_id,  # Person being analyzed
+                answers=answer_data.get("answers", []),
+                created_by=user_id  # Person who filled it
+            )
+            db.add(new_record)
+            db.commit()
+            db.refresh(new_record)
+            
+            log.info(f"✓ People analyzer completed and saved: {new_record.id}")
+            response = "Assessment completed! Your ratings have been submitted successfully. Thank you!"
+        else:
+            # Save to Answer table (regular quiz)
+            new_record = Answer(
+                id=uuid.uuid4(),
+                chatbot_id=uuid.UUID(chatbot_id),
+                answer_data=answer_data.get("answers", []),
+                attempter_by_id=user_id,
+                chat_history=conversation_history or []
+            )
+            db.add(new_record)
+            db.commit()
+            db.refresh(new_record)
+            
+            log.info(f"✓ Quiz completed and saved: {new_record.id}")
+            response = "Quiz completed! Your answers have been submitted successfully. Thank you!"
         
         return {
             "response": response,
             "quiz_state": quiz_state,
             "metadata": {
                 "completed": True,
-                "quiz_id": str(new_answer.id),
+                "record_id": str(new_record.id),
                 "total_questions": len(questions),
                 "answered": len(quiz_state["attempted"]),
                 "skipped": len(quiz_state["skipped"])
@@ -333,10 +363,10 @@ def handle_quiz_completion(
         }
         
     except Exception as e:
-        log.error(f"❌ Quiz completion failed: {e}", exc_info=True)
+        log.error(f"❌ Completion failed: {e}", exc_info=True)
         db.rollback()
         return {
-            "response": "Quiz completed, but there was an error saving your responses. Please contact support.",
+            "response": "Completed, but there was an error saving your responses. Please contact support.",
             "quiz_state": quiz_state,
             "error": str(e)
         }
@@ -350,26 +380,30 @@ def quiz_query_service(
     db: Session,
     chatbot_id: str,
     chatbot_name: str,
+    chatbot_mode: str,
     query: str,
     conversation_history: List[Dict[str, str]],
-    user_id: Optional[uuid.UUID] = None
+    user_id: Optional[uuid.UUID] = None,
+    employee_id: Optional[uuid.UUID] = None
 ) -> Dict[str, Any]:
     """
-    Handle quiz mode queries with intelligent conversation flow.
+    Handle quiz/people_analyzer mode queries with intelligent conversation flow.
     
     Args:
         db: Database session
         chatbot_id: Chatbot UUID
         chatbot_name: Name of the chatbot
+        chatbot_mode: "quiz" or "people_analyzer"
         query: User's message
         conversation_history: Previous conversation
-        user_id: UUID of the user taking the quiz
+        user_id: UUID of the user taking quiz/filling assessment
+        employee_id: UUID of employee being analyzed (people_analyzer mode only)
         
     Returns:
         Dict with response, quiz_state, and metadata
     """
     try:
-        log.info(f"🎯 Quiz query for '{chatbot_name}': {query[:60]}...")
+        log.info(f"{chatbot_mode} query for '{chatbot_name}': {query[:60]}...")
         
         # Fetch questions
         question_record = db.query(Question).filter(
@@ -451,9 +485,12 @@ def quiz_query_service(
             return handle_quiz_completion(
                 db=db,
                 chatbot_id=chatbot_id,
+                chatbot_mode=chatbot_mode,
                 user_id=user_id,
+                employee_id=employee_id,
                 quiz_state=quiz_state,
-                questions=questions
+                questions=questions,
+                conversation_history=conversation_history
             )
         
         # Handle clarification
@@ -468,14 +505,23 @@ def quiz_query_service(
         
         # Handle skip
         if intent == "skip":
-            quiz_state["skipped"].append(quiz_state["current_index"])
+            current_q_index = quiz_state["current_index"]
+            
+            # Record skipped answer
+            quiz_state["answers"][str(current_q_index)] = "skipped"
+            quiz_state["skipped"].append(current_q_index)
+            
+            # Move to next question
             quiz_state["current_index"] += 1
+
             
             if quiz_state["current_index"] >= len(questions):
                 return handle_quiz_completion(
                     db=db,
                     chatbot_id=chatbot_id,
+                    chatbot_mode=chatbot_mode,
                     user_id=user_id,
+                    employee_id=employee_id,
                     quiz_state=quiz_state,
                     questions=questions
                 )
@@ -518,8 +564,7 @@ def quiz_query_service(
             
             # Store answer
             quiz_state["answers"][str(current_q_index)] = {
-                "answer": query,
-                "timestamp": datetime.utcnow().isoformat()
+                "answer": query
             }
             quiz_state["attempted"].append(current_q_index)
             quiz_state["current_index"] += 1
@@ -529,7 +574,9 @@ def quiz_query_service(
                 return handle_quiz_completion(
                     db=db,
                     chatbot_id=chatbot_id,
+                    chatbot_mode=chatbot_mode,
                     user_id=user_id,
+                    employee_id=employee_id,
                     quiz_state=quiz_state,
                     questions=questions
                 )
@@ -543,7 +590,7 @@ def quiz_query_service(
             )
             
             progress = build_quiz_progress_summary(quiz_state, len(questions))
-            response = f"Got it! ✅ Answer recorded.\n\n{progress}\n{formatted_q}"
+            response = f"Got it! Your Answer recorded.\n\n{progress}\n{formatted_q}"
             
             return {
                 "response": response,

@@ -30,11 +30,6 @@ OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-s
 # Qdrant Configuration
 QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
-QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", None)
-QDRANT_COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_NAME", "chatbot_documents")
-QDRANT_STORAGE_PATH = os.getenv("QDRANT_STORAGE_PATH", "./qdrant_storage")  # Local file storage
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
-# Document Processing Configuration
-CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
-UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploaded_chatbots")
+

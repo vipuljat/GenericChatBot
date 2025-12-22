@@ -55,7 +55,7 @@ class Answer(Base):
     attempter_by_id = Column(String, ForeignKey("employees.employee_id", ondelete="SET NULL"), nullable=True)
     chatbot_id = Column(UUID(as_uuid=True), ForeignKey("chatbots.chatbot_id", ondelete="CASCADE"))
     answer_data = Column(JSONB, nullable=False)  # changed to JSONB
-    chat_history = Column(Text, nullable=True)  # Full answer text
+    chat_history = Column(JSONB, nullable=True)  # Full answer text
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -65,9 +65,9 @@ class PeopleAnalyzer(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
     chatbot_id = Column(UUID(as_uuid=True),ForeignKey("chatbots.chatbot_id", ondelete="CASCADE"),nullable=False)
-    employee_id = Column(UUID(as_uuid=True),ForeignKey("employees.id", ondelete="SET NULL"),nullable=True)
+    employee_id = Column(String,ForeignKey("employees.employee_id", ondelete="SET NULL"),nullable=True)
     answers = Column(JSONB, nullable=False)  # Full answer data / quiz answers
-    created_by = Column(UUID(as_uuid=True),ForeignKey("employees.id", ondelete="SET NULL"),nullable=True)
+    created_by = Column(String,ForeignKey("employees.employee_id", ondelete="SET NULL"),nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
