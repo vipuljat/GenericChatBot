@@ -11,11 +11,13 @@ Refactored Chatbot Service - FUNCTIONAL APPROACH
 import uuid
 from typing import List, Optional, Dict, Any
 from fastapi.encoders import jsonable_encoder
+from fastapi.params import Depends
 from sqlalchemy.orm import Session
-from fastapi import HTTPException, BackgroundTasks
+from fastapi import HTTPException, BackgroundTasks, Request
 from qdrant_client.models import PointStruct
 
-from stateful_services.db_schema import Answer, Chatbot, Employee, PeopleAnalyzer, Question
+from stateful_services.database import get_db
+from stateful_services.db_schema import Answer, Chatbot, ChatbotAccess, Employee, PeopleAnalyzer, Question
 from utils.document_service import extract_text_from_document, get_file_extension
 from utils.logging import log
 
@@ -26,6 +28,7 @@ from services.vectore_store_service import (
     upsert_points,
     delete_collection
 )
+from utils.token_decode import get_current_employee_from_token
 
 
 # ============================================================================
@@ -149,7 +152,7 @@ def process_documents_background(
 # ============================================================================
 
 def create_chatbot(
-    db: Session,
+    request: Request,
     chatbot_name: str,
     status: str,
     description: Optional[str] = None,
@@ -160,10 +163,15 @@ def create_chatbot(
     meta_data: Optional[Dict[str, Any]] = None,
     mode: Optional[str] = "general",
     questions: Optional[dict] = None,
-    background_tasks: Optional[BackgroundTasks] = None
+    employee_ids: Optional[List[str]] = None,
+    background_tasks: Optional[BackgroundTasks] = None,
+    db: Session=Depends(get_db)
 ) -> Chatbot:
     """Create chatbot and schedule document processing."""
     try:
+        user_info = get_current_employee_from_token(request, db)
+        
+        user_id = user_info.employee_id
         # Check uniqueness
         existing = db.query(Chatbot).filter(
             Chatbot.chatbot_name == chatbot_name
@@ -191,11 +199,21 @@ def create_chatbot(
         db.commit()
         db.refresh(chatbot)
         
-        log.info(f"✓ Chatbot created: {chatbot_name} (ID: {chatbot.chatbot_id})")
+        log.info(f" Chatbot created: {chatbot_name} (ID: {chatbot.chatbot_id})")
         
-        # Save questions if quiz mode
         if questions and mode in ("quiz", "people_analyzer"):
             save_questions(db, chatbot.chatbot_id, questions)
+
+        if employee_ids:
+            # Create access record
+            access_record = ChatbotAccess(
+                chatbot_id=chatbot.chatbot_id,
+                employee_id=user_id,
+                allowed_users=employee_ids
+            )
+            db.add(access_record)
+            db.commit()
+            log.info(f"Allowed users set for chatbot {chatbot_name}")
         
         # Schedule document processing
         if doc_contents and doc_names and background_tasks:
