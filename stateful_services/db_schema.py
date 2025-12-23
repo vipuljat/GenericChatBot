@@ -63,10 +63,9 @@ class PeopleAnalyzer(Base):
     __tablename__ = "people_analyzer"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-
     chatbot_id = Column(UUID(as_uuid=True),ForeignKey("chatbots.chatbot_id", ondelete="CASCADE"),nullable=False)
     employee_id = Column(String,ForeignKey("employees.employee_id", ondelete="SET NULL"),nullable=True)
-    answers = Column(JSONB, nullable=False)  # Full answer data / quiz answers
+    answers = Column(JSONB, nullable=False)  
     created_by = Column(String,ForeignKey("employees.employee_id", ondelete="SET NULL"),nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -76,9 +75,19 @@ class ChatbotPermission(Base):
     __tablename__ = "chatbot_permissions"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-
     chatbot_id = Column(UUID(as_uuid=True),ForeignKey("chatbots.chatbot_id", ondelete="CASCADE"),nullable=False)
-    employee_id = Column(UUID(as_uuid=True),ForeignKey("employees.id", ondelete="CASCADE"),nullable=False)
+    employee_id = Column(JSONB, nullable=False)
     created_by = Column(UUID(as_uuid=True),ForeignKey("employees.id", ondelete="SET NULL"),nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class ChatbotAccess(Base):
+    __tablename__ = "chatbot_access"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    chatbot_id = Column(UUID(as_uuid=True),ForeignKey("chatbots.chatbot_id", ondelete="CASCADE"),nullable=False)
+    employee_id = Column(String,ForeignKey("employees.employee_id", ondelete="SET NULL"),nullable=True)
+    allowed_users=Column(JSONB, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

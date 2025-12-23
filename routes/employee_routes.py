@@ -426,7 +426,7 @@ def create_employee(
 
 def create_employee_service(
     db: Session,
-    employee_id: str,
+    employee_id: Optional[str],
     employee_name: str,
     employee_email: Optional[str],
     employee_role: str,
@@ -439,11 +439,11 @@ def create_employee_service(
 
     try:
         # Check employee_id uniqueness
-        if db.query(Employee).filter(Employee.employee_id == employee_id).first():
-            raise HTTPException(
-                status_code=400,
-                detail="Employee with this employee_id already exists",
-            )
+        # if db.query(Employee).filter(Employee.employee_id == employee_id).first():
+        #     raise HTTPException(
+        #         status_code=400,
+        #         detail="Employee with this employee_id already exists",
+        #     )
 
         # Check email uniqueness
         if employee_email:

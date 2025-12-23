@@ -1,15 +1,3 @@
-"""
-Refactored Service Architecture - FUNCTIONAL APPROACH
-======================================================
-
-All services using pure functions instead of classes.
-Cost tracking integrated throughout.
-"""
-
-# ============================================================================
-# 1. services/embedding_service.py - FUNCTIONAL EMBEDDING SERVICE
-# ============================================================================
-
 """Functional embedding service with OpenAI and Gemini fallback."""
 
 import re
@@ -47,9 +35,10 @@ def estimate_embedding_cost(texts: List[str]) -> Dict[str, float]:
 # ============================================================================
 
 _openai_client: Optional[OpenAI] = None
-_use_gemini: bool = False
+_use_gemini: bool = False  # Changed to False - we'll set this properly during init
 _openai_model: str = None
 _gemini_model: str = None
+_initialized: bool = False  # Track if we've actually initialized
 
 
 def _init_openai() -> bool:
@@ -84,20 +73,23 @@ def _init_gemini() -> bool:
 
 def _ensure_initialized():
     """Ensure embedding client is initialized with fallback."""
-    global _openai_client, _use_gemini
+    global _openai_client, _use_gemini, _initialized
     
-    if _openai_client is not None or _use_gemini:
+    # If already initialized, skip
+    if _initialized:
         return
     
     # Try OpenAI first
     if _init_openai():
         _use_gemini = False
+        _initialized = True
         return
     
     # Fallback to Gemini
     log.warning("OpenAI unavailable, falling back to Gemini...")
     if _init_gemini():
         _use_gemini = True
+        _initialized = True
         return
     
     raise RuntimeError("Neither OpenAI nor Gemini embedding services available")
@@ -112,7 +104,7 @@ def generate_embedding(text: str) -> List[float]:
     Generate single embedding vector.
     Automatically logs cost estimation.
     """
-    global _use_gemini   # ✅ REQUIRED
+    global _use_gemini
 
     _ensure_initialized()
     
@@ -120,7 +112,7 @@ def generate_embedding(text: str) -> List[float]:
     cost = estimate_embedding_cost([text])
     log.info(
         f"Embedding: {cost['estimated_tokens']} tokens, "
-        f"${cost['estimated_cost_usd']:6f} (single text)"
+        f"${cost['estimated_cost_usd']:.6f} (single text)"
     )
     
     if _use_gemini:
@@ -142,7 +134,8 @@ def generate_embedding(text: str) -> List[float]:
             # Auto-fallback to Gemini
             log.warning("Falling back to Gemini for embedding...")
             _use_gemini = True
-            _init_gemini()
+            if not _init_gemini():
+                raise RuntimeError("Gemini fallback failed after OpenAI error")
             return generate_embedding(text)
 
 
@@ -154,6 +147,8 @@ def generate_embeddings_batch(
     Generate embeddings for multiple texts.
     Automatically logs cost for each batch.
     """
+    global _use_gemini
+    
     _ensure_initialized()
     
     # Log total estimated cost
@@ -161,7 +156,7 @@ def generate_embeddings_batch(
     log.info(
         f"📊 Batch embedding: {len(texts)} texts, "
         f"{total_cost['estimated_tokens']} tokens, "
-        f"${total_cost['estimated_cost_usd']}"
+        f"${total_cost['estimated_cost_usd']:.6f}"
     )
     
     all_embeddings = []
@@ -174,7 +169,7 @@ def generate_embeddings_batch(
         log.info(
             f"Batch {i//batch_size + 1}: {len(batch)} texts, "
             f"{batch_cost['estimated_tokens']} tokens, "
-            f"${batch_cost['estimated_cost_usd']}"
+            f"${batch_cost['estimated_cost_usd']:.6f}"
         )
         
         if _use_gemini:
@@ -187,13 +182,31 @@ def generate_embeddings_batch(
                 )
                 all_embeddings.append(result['embedding'])
         else:
-            # OpenAI: true batch processing
-            response = _openai_client.embeddings.create(
-                model=_openai_model,
-                input=batch
-            )
-            embeddings = [data.embedding for data in response.data]
-            all_embeddings.extend(embeddings)
+            try:
+                response = _openai_client.embeddings.create(
+                    model=_openai_model,
+                    input=batch
+                )
+                embeddings = [data.embedding for data in response.data]
+                all_embeddings.extend(embeddings)
+
+            except Exception as e:
+                log.error(f"OpenAI batch embedding failed: {e}")
+                log.warning("Falling back to Gemini for batch embedding...")
+
+                _use_gemini = True
+                if not _init_gemini():
+                    raise RuntimeError("Gemini fallback failed after OpenAI batch error")
+
+                # Retry this batch using Gemini
+                for text in batch:
+                    result = genai.embed_content(
+                        model=_gemini_model,
+                        content=text,
+                        task_type="retrieval_document"
+                    )
+                    all_embeddings.append(result["embedding"])
+
         
         log.info(f"✓ Batch {i//batch_size + 1} complete")
     
@@ -351,5 +364,3 @@ def process_document_for_embedding(
     log.info(f"✓ Processed document: {len(chunks)} chunks, {total_chars} chars total")
     
     return chunks
-
-

@@ -118,9 +118,10 @@ async def auth_callback(code: str = None, error: str = None, error_description: 
             print(f"DEBUG: Created new employee with ID: {employee.id}")
         else:
             # Update employee info
+            employee.employee_id = microsoft_id
             employee.employee_name = employee_name
-            employee.employee_email = employee_email
-            employee.department = department
+            employee.employee_email = employee_email    
+            # employee.department = department
             employee.updated_at = datetime.now(timezone.utc)
             db.commit()
             print(f"DEBUG: Updated existing employee ID: {employee.id}")
