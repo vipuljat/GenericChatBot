@@ -513,7 +513,7 @@ def get_people_analyzer_responses(
             if q_id_str not in grouped[emp_id]["question_stats"]:
                 grouped[emp_id]["question_stats"][q_id_str] = {"sum": 0, "count": 0}
 
-            score = {"+": 1, "-": -1, "+-": 0}.get(str(answer).strip(), 0)
+            score = {"+": 4, "-": 0, "+-": 2}.get(str(answer).strip(), 0)
             grouped[emp_id]["question_stats"][q_id_str]["sum"] += score
             grouped[emp_id]["question_stats"][q_id_str]["count"] += 1
 

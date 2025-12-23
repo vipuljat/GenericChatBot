@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.name }}-{{ .Release.Namespace }}-clusterip
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 8001
+    protocol: TCP
+    targetPort: 8001
+  selector:
+    dev: {{ .Values.name }}

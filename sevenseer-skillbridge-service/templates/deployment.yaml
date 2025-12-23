@@ -1,0 +1,149 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      dev: {{ .Values.name }}
+  template:
+    metadata:
+      labels:
+        dev: {{ .Values.name }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Values.name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8001
+              protocol: TCP
+          env:
+       
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: POSTGRES_DB
+            - name: POSTGRES_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: POSTGRES_HOST
+            - name: POSTGRES_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: POSTGRES_PORT
+            - name: CONTENT_MANAGEMENT_DOWNLOAD_MEDIA
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: CONTENT_MANAGEMENT_DOWNLOAD_MEDIA
+            - name: USER_MANAGEMENT_IDENTITY_LIST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: USER_MANAGEMENT_IDENTITY_LIST
+            - name: CONTENT_MANAGEMENT_COPY_OBJECTS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: CONTENT_MANAGEMENT_COPY_OBJECTS
+            - name: USER_MANAGEMENT_IDENTITY_COUNT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: USER_MANAGEMENT_IDENTITY_COUNT
+            - name: APPLY_LINK
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: APPLY_LINK
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: OPENAI_API_KEY
+            - name: ADD_NOTIFICATION_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: ADD_NOTIFICATION_URL
+            - name: EXPORT_DOC_PDF
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: EXPORT_DOC_PDF
+            - name: CONTENT_MANAGEMENT_UPLOAD_MEDIA
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: CONTENT_MANAGEMENT_UPLOAD_MEDIA
+            - name: EXPOSED_DOC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: EXPOSED_DOC_URL
+            - name: CONTENT_MANAGEMENT_CREATE_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: CONTENT_MANAGEMENT_CREATE_BUCKET
+            - name: CONTENT_MANAGEMENT_REMOVE_S3CONTENT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: CONTENT_MANAGEMENT_REMOVE_S3CONTENT
+            - name: USER_MANAGEMENT_IDENTITY_INFO
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: USER_MANAGEMENT_IDENTITY_INFO
+            - name: OPEN_JOB_SEARCH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: OPEN_JOB_SEARCH_TOKEN
+            - name: DB_CONNECTIONS_LIMIT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: DB_CONNECTIONS_LIMIT
+            - name: CONTENT_MANAGEMENT_LEARNING_PATH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: CONTENT_MANAGEMENT_LEARNING_PATH
+            - name: MASTER_LP_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: MASTER_LP_BASE_URL
+            - name: MEDIA_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: MEDIA_URL
+          {{- if .Values.Resources.enabled }}    
+          resources:
+            {{- toYaml .Values.Resources.resources | nindent 12 }}
+          {{- end }}
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30

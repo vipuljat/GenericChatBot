@@ -1,0 +1,32 @@
+# Default values for mono.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+#Name
+name: sevenseer-skillbridge-service
+#Replicas
+replicaCount: 1
+
+
+#ingress:
+# host: a-------------------------------9
+
+
+#Images
+image:
+  repository: labs47b/sevenseer-skillbridge-service
+  tag: a-------------------------------9
+  pullPolicy: Always
+
+#ImageSecrets:
+imagePullSecrets:
+        - name: dockerregistryi
+
+#Resources
+Resources:
+  enabled: false
+  resources:
+    requests:
+      cpu: 512m
+    limits:
+      cpu: 512m

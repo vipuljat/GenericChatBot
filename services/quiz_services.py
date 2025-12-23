@@ -94,9 +94,6 @@ Examples:
         return "answer"
 
 
-# ============================================================================
-# QUIZ STATE MANAGEMENT
-# ============================================================================
 
 def get_quiz_session_from_history(conversation_history: List[Dict[str, str]]) -> Dict[str, Any]:
     """
@@ -193,10 +190,6 @@ def format_question_for_display(question: Dict[str, Any], index: int, total: int
     return formatted
 
 
-# ============================================================================
-# CLARIFICATION HANDLER
-# ============================================================================
-
 def handle_clarification_question(
     query: str,
     chatbot_name: str,
@@ -276,11 +269,6 @@ Keep your response concise (2-3 sentences max).
                 "current_question_index": quiz_state["current_index"]
             }
         }
-
-
-# ============================================================================
-# QUIZ COMPLETION HANDLER
-# ============================================================================
 
 def handle_quiz_completion(
     db: Session,
