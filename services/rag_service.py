@@ -1,268 +1,303 @@
-"""
-RAG (Retrieval-Augmented Generation) Service
-Handles query processing, embedding search, and response generation
-"""
-from typing import List, Dict, Optional
-import logging
-from services.embedding_service import get_embedding_service
-from services.pipeline import get_system_prompt, Mode
-# from services.qdrant_service import get_qdrant_service
+"""Functional RAG service with cost tracking."""
+
+import time
+from typing import List, Dict, Optional, Any, Tuple
 import google.generativeai as genai
 import config
+from utils.logging import log
 
-logger = logging.getLogger(__name__)
+# Import our functional services
+from utils.embedding import generate_embedding
+from services.vectore_store_service import search_similar
+from utils.utilities import estimate_llm_cost
 
-class RAGService:
-    """Service for retrieval-augmented generation"""
+genai.configure(api_key=config.GEMINI_API_KEY)
+
+
+# ============================================================================
+# CONTEXT RETRIEVAL (NO LLM)
+# ============================================================================
+
+def retrieve_context(
+    chatbot_name: str,
+    query: str,
+    top_k: int = 10,
+    min_score: float = 0.55,
+    max_context_chars: int = 4000,
+    document_type: Optional[str] = None
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    Retrieve relevant context from vector store.
+    Returns: (formatted_context, source_chunks)
     
-    def __init__(self):
-        self.embedding_service = get_embedding_service()
-        # self.qdrant_service = get_qdrant_service()
-        genai.configure(api_key=config.GEMINI_API_KEY)
+    NO LLM CALLS - JUST RETRIEVAL.
+    Logs embedding cost.
+    """
+    # Generate query embedding ONCE with cost logging
+    log.info(f"🔍 Retrieving context for: {query[:60]}...")
+    query_vector = generate_embedding(query)  # Cost logged inside
     
-    def retrieve_relevant_context(
-        self,
-        query: str,
-        chatbot_id: int,
-        top_k: int = 5
-    ) -> tuple[List[Dict], str]:
-        """
-        Retrieve relevant document chunks for a query
+    # Search vector store
+    filters = {'document_type': document_type} if document_type else None
+    chunks = search_similar(
+        collection_name=chatbot_name,
+        query_vector=query_vector,
+        limit=top_k,
+        min_score=min_score,
+        filters=filters
+    )
+    
+    if not chunks:
+        log.info("No relevant context found")
+        return "", []
+    
+    # Format context
+    context_parts = []
+    total_chars = 0
+    valid_chunks = []
+    
+    for chunk in chunks:
+        text = chunk.get('text', '').strip()
+        if not text or len(text) < 20:
+            continue
         
-        Args:
-            query: User's question
-            chatbot_id: ID of the chatbot to search within
-            top_k: Number of most relevant chunks to retrieve
+        source = chunk.get('source_file', 'Unknown')
+        doc_type = chunk.get('document_type', 'unknown')
+        
+        chunk_text = f"[Source: {source} ({doc_type})]\n{text}\n"
+        
+        if total_chars + len(chunk_text) > max_context_chars:
+            break
+        
+        context_parts.append(chunk_text)
+        valid_chunks.append(chunk)
+        total_chars += len(chunk_text)
+    
+    context = "\n---\n".join(context_parts)
+    log.info(f"✓ Context: {total_chars} chars from {len(valid_chunks)} chunks")
+    
+    return context, valid_chunks
+
+
+# ============================================================================
+# LLM GENERATION WITH RETRY
+# ============================================================================
+
+def map_role_to_gemini(role: str) -> str:
+    """Map role names to Gemini format."""
+    role_lower = role.lower()
+    if role_lower == 'user':
+        return 'user'
+    if role_lower in ['model', 'assistant', 'bot', 'ai', 'system']:
+        return 'model'
+    return 'user'
+
+
+# def generate_with_retry(
+#     prompt: str,
+#     conversation_history: List[Dict[str, str]],
+#     model_name: str,
+#     max_retries: int = 3
+# ):
+#     """Generate response with retry logic for rate limits."""
+#     backoff = 2
+#     last_error = None
+    
+#     for attempt in range(1, max_retries + 1):
+#         try:
+#             model = genai.GenerativeModel(model_name)
             
-        Returns:
-            Tuple of (search_results, formatted_context)
-        """
+#             if conversation_history:
+#                 history = [
+#                     {
+#                         "role": map_role_to_gemini(msg["role"]),
+#                         "parts": [msg["content"]]
+#                     }
+#                     for msg in conversation_history
+#                 ]
+#                 chat = model.start_chat(history=history)
+#                 return chat.send_message(prompt)
+            
+#             return model.generate_content(prompt)
+        
+#         except Exception as e:
+#             last_error = e
+#             msg = str(e)
+            
+#             if ("429" in msg or "quota" in msg.lower() or "rate" in msg.lower()) and attempt < max_retries:
+#                 log.warning(f"⚠️  Rate limit (attempt {attempt}), retrying in {backoff}s")
+#                 time.sleep(backoff)
+#                 backoff *= 2
+#                 continue
+            
+#             break
+    
+#     raise last_error or RuntimeError("Generation failed after retries")
+
+
+def generate_with_retry(
+    prompt: str,
+    conversation_history: List[Dict[str, str]],
+    model_name: str,
+    max_retries: int = 3
+):
+    """
+    Generate response with retry logic and automatic cost tracking.
+    
+    Args:
+        prompt: The prompt to send to the model
+        conversation_history: Previous conversation messages
+        model_name: Model identifier (e.g., gemini-1.5-pro)
+        max_retries: Maximum retry attempts for rate limits
+        
+    Returns:
+        Model response object with .text attribute
+    """
+    backoff = 2
+    last_error = None
+    
+    for attempt in range(1, max_retries + 1):
         try:
-            # Generate embedding for the query
-            logger.info(f"Generating embedding for query: {query[:50]}...")
-            query_embedding = self.embedding_service.generate_embedding(query)
+            model = genai.GenerativeModel(model_name)
             
-            # Search for similar chunks in Qdrant
-            logger.info(f"Searching for relevant chunks in chatbot {chatbot_id}")
-            search_results = self.qdrant_service.search_similar(
-                query_embedding=query_embedding,
-                chatbot_id=chatbot_id,
-                limit=top_k
-            )
+            if conversation_history:
+                history = [
+                    {
+                        "role": map_role_to_gemini(msg["role"]),
+                        "parts": [msg["content"]]
+                    }
+                    for msg in conversation_history
+                ]
+                chat = model.start_chat(history=history)
+                response = chat.send_message(prompt)
+            else:
+                response = model.generate_content(prompt)
             
-            if not search_results:
-                logger.warning(f"No relevant documents found for chatbot {chatbot_id}")
-                return [], ""
+            # Calculate and log cost
+            cost = estimate_llm_cost(prompt, response.text, model_name)
+    
             
-            # Format context from search results
-            context_parts = []
-            for i, result in enumerate(search_results, 1):
-                metadata = result['metadata']
-                text = metadata.get('text', '')
-                doc_name = metadata.get('doc_name', 'Unknown')
-                score = result['score']
-                
-                context_parts.append(
-                    f"[Document {i}: {doc_name} (Relevance: {score:.2f})]\n{text}\n"
-                )
-            
-            formatted_context = "\n---\n".join(context_parts)
-            logger.info(f"Retrieved {len(search_results)} relevant chunks")
-            
-            return search_results, formatted_context
-            
+            return response
+        
         except Exception as e:
-            logger.error(f"Error retrieving context: {str(e)}")
-            return [], ""
+            last_error = e
+            msg = str(e)
+            
+            if ("429" in msg or "quota" in msg.lower() or "rate" in msg.lower()) and attempt < max_retries:
+                log.warning(f"⚠️  Rate limit (attempt {attempt}), retrying in {backoff}s")
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            
+            break
     
-    def generate_response(
-        self,
-        query: str,
-        chatbot_id: int,
-        chatbot_mode: str = "chatbot",  # Added: "chatbot" or "quiz"
-        chatbot_instructions: Optional[str] = None,
-        conversation_history: Optional[List[Dict[str, str]]] = None,
-        model_name: Optional[str] = None,
-        max_retries: int = 3
-    ) -> Dict:
-        """
-        Generate a response using RAG with pipeline integration.
-        
-        Args:
-            query: User's question
-            chatbot_id: ID of the chatbot
-            chatbot_mode: Operating mode ("chatbot" or "quiz")
-            chatbot_instructions: Custom instructions for the chatbot
-            conversation_history: Previous conversation messages
-            model_name: Gemini model to use
-            
-        Returns:
-            Dict with response and metadata
-        """
-        try:
-            # Retrieve relevant context
-            search_results, context = self.retrieve_relevant_context(
-                query=query,
-                chatbot_id=chatbot_id,
-                top_k=5
-            )
-            # No context found - use pipeline casual mode
-            if not context or not context.strip():
-                logger.info("No relevant context found. Using conversational mode with pipeline.")
-                
-                # Get pipeline system prompt
-                system_prompt = get_system_prompt(
-                    mode=chatbot_mode,
-                    custom_instructions=chatbot_instructions
-                )
-                
-                casual_prompt = f"""
-                {system_prompt}
-                
-                User Question: {query}
-                
-                Assistant Response:
-                """
-                
-                resolved_model = model_name or config.GEMINI_MODEL
-                logger.info(f"Generating casual response with {resolved_model}")
-                
-                response_obj = self._generate_with_retry(
-                    prompt=casual_prompt,
-                    conversation_history=conversation_history,
-                    initial_model=resolved_model,
-                    max_retries=max_retries
-                )
-                
-                return {
-                    "response": response_obj.text.strip(),
-                    "sources": [],
-                    "context_used": False,
-                    "num_chunks_used": 0
-                }
-            
-            # Build the prompt using pipeline system prompt
-            system_prompt = get_system_prompt(
-                mode=chatbot_mode,
-                custom_instructions=chatbot_instructions
-            )
-            
-            # RAG prompt with context - follows pipeline rules
-            prompt = f"""
-{system_prompt}
+    raise last_error or RuntimeError("Generation failed after retries")
 
-==============================
-CONTEXT (AUTHORITATIVE)
-==============================
+
+def generate_rag_response(
+    query: str,
+    chatbot_name: str,
+    chatbot_instructions: Optional[str] = None,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    top_k: int = 10,
+    min_score: float = 0.55,
+    max_retries: int = 3,
+    model_name: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Complete RAG pipeline - functional approach.
+    
+    Steps:
+    1. Retrieve context (logs embedding cost)
+    2. Generate response (ONE LLM call)
+    3. Return with sources
+    
+    All costs automatically logged.
+    """
+    try:
+        log.info(f"🤖 RAG query for '{chatbot_name}': {query[:60]}...")
+        
+        # Step 1: Retrieve context (embedding cost logged inside)
+        context, source_chunks = retrieve_context(
+            chatbot_name=chatbot_name,
+            query=query,
+            top_k=top_k,
+            min_score=min_score
+        )
+        
+        # Step 2: Build prompt
+        base_instructions = chatbot_instructions or (
+            "You are a helpful, knowledgeable assistant. "
+            "Answer naturally and conversationally."
+        )
+        
+        has_context = bool(context and context.strip())
+        
+        if has_context:
+            prompt = f"""{base_instructions}
+
+Relevant Context:
 {context}
 
-==============================
-USER QUESTION
-==============================
-{query}
+User Question: {query}
 
-==============================
-RESPONSE GUIDELINES
-==============================
-- Provide a direct and accurate answer grounded in the context above.
-- If the context does not fully answer the question, clearly state the limitation.
-- Keep the response well-structured and easy to understand.
+Instructions:
+- Answer naturally without mentioning "the documents" or "the context"
+- Use the context to provide accurate information
+- If context doesn't fully answer, say so clearly
+- Be concise and helpful
 
-ASSISTANT RESPONSE:
-"""
-            
-            # Resolve model name (prefer explicit param, then config)
-            resolved_model = model_name or config.GEMINI_MODEL
-            if resolved_model.endswith("-exp"):
-                logger.warning(
-                    "Experimental model requested; falling back to configured stable model"
-                )
-                resolved_model = config.GEMINI_MODEL
-            logger.info(f"Generating response with {resolved_model}")
+Response:"""
+        else:
+            prompt = f"""{base_instructions}
 
-            response_obj = self._generate_with_retry(
-                prompt=prompt,
-                conversation_history=conversation_history,
-                initial_model=resolved_model,
-                max_retries=max_retries
-            )
-            
-            # Extract source documents
-            sources = [
-                {
-                    "doc_name": result['metadata'].get('doc_name', 'Unknown'),
-                    "relevance_score": result['score'],
-                    "chunk_index": result['metadata'].get('chunk_index', 0)
-                }
-                for result in search_results
-            ]
-            
-            logger.info("Response generated successfully")
-            return {
-                "response": response_obj.text,
-                "sources": sources,
-                "context_used": True,
-                "num_chunks_used": len(search_results)
+User Question: {query}
+
+Respond naturally and helpfully:"""
+        
+        # Step 3: Generate response (ONE LLM CALL)
+        resolved_model = model_name or config.GEMINI_MODEL
+        log.info(f"💬 Generating with {resolved_model}...")
+        
+        response_obj = generate_with_retry(
+            prompt=prompt,
+            conversation_history=conversation_history or [],
+            model_name=resolved_model,
+            max_retries=max_retries
+        )
+        
+        llm_cost = estimate_llm_cost(
+            prompt=prompt,
+            response=response_obj.text,
+            model_name=resolved_model
+        )
+
+        
+                # Step 4: Format sources
+        sources = [
+            {
+                "source_file": chunk['source_file'],
+                "document_type": chunk['document_type'],
+                "relevance_score": round(chunk['score'], 3),
+                "chunk_index": chunk['chunk_index']
             }
-            
-        except Exception as e:
-            logger.error(f"Error generating response: {str(e)}")
-            return {
-                "response": f"An error occurred while generating the response: {str(e)}",
-                "sources": [],
-                "context_used": False,
-                "error": str(e)
-            }
-
-
-    # Helper methods inside class
-    def _attempt_model(self, model_name_local: str, prompt: str, conversation_history: Optional[List[Dict[str, str]]]):
-        m = genai.GenerativeModel(model_name_local)
-        if conversation_history:
-            chat = m.start_chat(history=[
-                {"role": msg["role"], "parts": [msg["content"]]}
-                for msg in conversation_history
-            ])
-            return chat.send_message(prompt)
-        return m.generate_content(prompt)
-
-    def _generate_with_retry(
-        self,
-        prompt: str,
-        conversation_history: Optional[List[Dict[str, str]]],
-        initial_model: str,
-        max_retries: int
-    ):
-        resolved_model = initial_model
-        backoff = 2
-        last_error = None
-        import time
-        for attempt in range(1, max_retries + 1):
-            try:
-                return self._attempt_model(resolved_model, prompt, conversation_history)
-            except Exception as e:
-                msg = str(e)
-                last_error = e
-                rate_limited = ("429" in msg) or ("quota" in msg.lower()) or ("rate" in msg.lower())
-                if rate_limited and attempt < max_retries:
-                    logger.warning(
-                        f"Rate limit/quota issue (attempt {attempt}); sleeping {backoff}s then retrying."
-                    )
-                    time.sleep(backoff)
-                    backoff *= 2
-                    if attempt == 1 and resolved_model != "gemini-1.5-flash":
-                        logger.info("Switching fallback model to gemini-1.5-flash due to rate limit.")
-                        resolved_model = "gemini-1.5-flash"
-                    continue
-                logger.error(f"Gemini generation failed: {msg}")
-                break
-        raise last_error or RuntimeError("Failed after retries")
-
-# Singleton instance
-_rag_service = None
-
-def get_rag_service() -> RAGService:
-    global _rag_service
-    if _rag_service is None:
-        _rag_service = RAGService()
-    return _rag_service
+            for chunk in source_chunks
+        ] if has_context else []
+        
+        log.info(f"✓ Response generated ({len(sources)} sources)")
+        
+        return {
+            "response": response_obj.text.strip(),
+            "sources": sources,
+            "context_used": has_context,
+            "num_chunks_used": len(source_chunks)
+        }
+    
+    except Exception as e:
+        log.error(f"❌ RAG failed: {e}", exc_info=True)
+        return {
+            "response": "I'm having trouble processing your request. Please try again.",
+            "sources": [],
+            "context_used": False,
+            "error": str(e)
+        }

@@ -1,110 +1,92 @@
-"""Chatbot service with multi-format document processing and chunked embeddings."""
+"""
+Refactored Chatbot Service - FUNCTIONAL APPROACH
+"""
 
-import time
+# ============================================================================
+# services/chatbot_service.py - FUNCTIONAL CHATBOT CRUD
+# ============================================================================
+
+"""Functional chatbot CRUD service."""
+
 import uuid
 from typing import List, Optional, Dict, Any
-from datetime import datetime
-import google.generativeai as genai
-import config
+from fastapi.encoders import jsonable_encoder
+from fastapi.params import Depends
 from sqlalchemy.orm import Session
-from fastapi import HTTPException, BackgroundTasks
-from qdrant_client.models import Distance, VectorParams, PointStruct
-from stateful_services.db_schema import Chatbot, Question
-from stateful_services.database import qdrant_manager
+from fastapi import HTTPException, BackgroundTasks, Request
+from qdrant_client.models import PointStruct
+
+from stateful_services.database import get_db
+from stateful_services.db_schema import Answer, Chatbot, ChatbotAccess, Employee, PeopleAnalyzer, Question
 from utils.document_service import extract_text_from_document, get_file_extension
-from utils.embedding import process_document_for_embedding
-from utils.embedding import generate_embedding
 from utils.logging import log
 
-genai.configure(api_key=config.GEMINI_API_KEY)
-
-def _sanitize_collection_name(chatbot_name: str) -> str:
-    """
-    Sanitize chatbot name to create a valid Qdrant collection name.
-    
-    Qdrant collection names must:
-    - Start with a letter or underscore
-    - Contain only letters, numbers, underscores, and hyphens
-    - Be between 1-255 characters
-    
-    Args:
-        chatbot_name: Original chatbot name
-        
-    Returns:
-        Sanitized collection name
-    """
-    import re
-    
-    # Replace spaces and special chars with underscores
-    sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', chatbot_name)
-    
-    # Ensure it starts with a letter or underscore
-    if sanitized and not sanitized[0].isalpha() and sanitized[0] != '_':
-        sanitized = f'_{sanitized}'
-    
-    # Limit length to 255 characters
-    sanitized = sanitized[:255]
-    
-    # Ensure not empty
-    if not sanitized:
-        sanitized = 'chatbot_default'
-    
-    return sanitized
+# Import functional services
+from utils.embedding import process_document_for_embedding
+from services.vectore_store_service import (
+    create_collection,
+    upsert_points,
+    delete_collection
+)
+from utils.token_decode import get_current_employee_from_token
 
 
-def _process_documents_and_store_embeddings(
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def save_questions(db: Session, chatbot_id: uuid.UUID, questions: dict):
+    """Save or update questions for quiz mode."""
+    existing = db.query(Question).filter(
+        Question.chatbot_id == chatbot_id
+    ).first()
+    
+    if existing:
+        existing.question_data = questions
+    else:
+        new_questions = Question(
+            chatbot_id=chatbot_id,
+            question_data=questions
+        )
+        db.add(new_questions)
+    
+    db.commit()
+    log.info(f"✓ Questions saved for chatbot {chatbot_id}")
+
+
+def process_documents_background(
     chatbot_name: str,
     doc_contents: List[bytes],
     doc_names: List[str]
 ):
     """
-    Background task: Extract text from documents, chunk, generate embeddings, and store in Qdrant.
+    Background task: Process documents and store embeddings.
     
-    Supports: PDF, DOCX, DOC, TXT, RTF
-    
-    Args:
-        chatbot_name: Name of the chatbot (used as collection name)
-        doc_contents: List of document file contents
-        doc_names: List of document filenames
+    KEY: Embeddings generated ONCE per chunk with cost logging.
     """
     try:
-        log.info(
-            f"Starting document processing for chatbot '{chatbot_name}' "
-            f"({len(doc_contents)} documents)"
-        )
+        log.info(f"📄 Processing {len(doc_contents)} documents for '{chatbot_name}'")
         
-        client = qdrant_manager.get_client()
-        if not client:
-            log.error("Qdrant client unavailable for background task")
-            return
-        
-        # Use chatbot name directly as collection name (sanitized)
-        collection_name = _sanitize_collection_name(chatbot_name)
-        
-        log.info(f"Using collection name: {collection_name}")
-        
-        # Process each document
         all_points = []
         point_id = 0
         
+        # Process each document
         for doc_content, doc_name in zip(doc_contents, doc_names):
             try:
-                log.info(f"Processing document: {doc_name}")
+                log.info(f"Processing: {doc_name}")
                 
-                # Extract text from document (supports multiple formats)
+                # Extract text
                 text = extract_text_from_document(doc_content, doc_name)
                 
                 if not text or not text.strip():
-                    log.warning(f"No text extracted from {doc_name}")
+                    log.warning(f"⚠️  No text from {doc_name}")
                     continue
                 
-                log.info(
-                    f"Extracted {len(text)} characters from {doc_name}"
-                )
+                log.info(f"✓ Extracted {len(text)} chars from {doc_name}")
                 
                 doc_type = get_file_extension(doc_name) or 'unknown'
                 
-                # Chunk and generate embeddings
+                # Chunk and generate embeddings (costs logged inside)
                 chunks_with_embeddings = process_document_for_embedding(
                     text=text,
                     metadata={
@@ -115,86 +97,62 @@ def _process_documents_and_store_embeddings(
                 )
                 
                 if not chunks_with_embeddings:
-                    log.warning(f"No chunks generated from {doc_name}")
+                    log.warning(f"⚠️  No chunks from {doc_name}")
                     continue
                 
-                log.info(
-                    f"Generated {len(chunks_with_embeddings)} chunks "
-                    f"with embeddings for {doc_name}"
-                )
+                log.info(f"✓ {len(chunks_with_embeddings)} chunks with embeddings")
                 
                 # Prepare Qdrant points
-                for chunk_data in chunks_with_embeddings:
+                for chunk in chunks_with_embeddings:
                     point = PointStruct(
                         id=point_id,
-                        vector=chunk_data['embedding'],
+                        vector=chunk['embedding'],
                         payload={
-                            'text': chunk_data['text'],
+                            'text': chunk['text'],
                             'chatbot_name': chatbot_name,
                             'source_file': doc_name,
                             'document_type': doc_type,
-                            'chunk_index': chunk_data['chunk_index'],
-                            'total_chunks': chunk_data['total_chunks'],
-                            'char_count': chunk_data['char_count']
+                            'chunk_index': chunk['chunk_index'],
+                            'total_chunks': chunk['total_chunks'],
+                            'char_count': chunk['char_count']
                         }
                     )
                     all_points.append(point)
                     point_id += 1
-                    
+            
             except Exception as e:
-                log.error(f"Error processing document {doc_name}: {e}", exc_info=True)
+                log.error(f"❌ Error processing {doc_name}: {e}", exc_info=True)
                 continue
         
         if not all_points:
-            log.error(f"No embeddings generated for chatbot '{chatbot_name}'")
+            log.error(f"❌ No embeddings generated for '{chatbot_name}'")
             return
         
-        # Get vector dimension from first embedding
+        # Create collection and upload
         vector_size = len(all_points[0].vector)
-        
-        # Create or recreate collection
-        existing_collections = [col.name for col in client.get_collections().collections]
-        
-        if collection_name in existing_collections:
-            log.info(f"Recreating existing collection: {collection_name}")
-            client.delete_collection(collection_name=collection_name)
-        
-        client.create_collection(
-            collection_name=collection_name,
-            vectors_config=VectorParams(
-                size=vector_size,
-                distance=Distance.COSINE
-            )
-        )
-        log.info(f"Created Qdrant collection: {collection_name}")
-        
-        # Upload points to Qdrant in batches
-        batch_size = 100
-        for i in range(0, len(all_points), batch_size):
-            batch = all_points[i:i + batch_size]
-            client.upsert(
-                collection_name=collection_name,
-                points=batch
-            )
-            log.info(
-                f"Uploaded batch {i//batch_size + 1} "
-                f"({len(batch)} points) to Qdrant"
-            )
-        
-        log.info(
-            f"Successfully stored {len(all_points)} embeddings in Qdrant "
-            f"for chatbot '{chatbot_name}' (collection: {collection_name})"
+        create_collection(
+            collection_name=chatbot_name,
+            vector_size=vector_size,
+            force_recreate=True
         )
         
+        upsert_points(
+            collection_name=chatbot_name,
+            points=all_points
+        )
+        
+        log.info(f"✅ Stored {len(all_points)} embeddings for '{chatbot_name}'")
+    
     except Exception as e:
-        log.error(
-            f"Background task failed for chatbot '{chatbot_name}': {e}",
-            exc_info=True
-        )
+        log.error(f"❌ Background processing failed: {e}", exc_info=True)
 
 
-def create_chatbot_service(
-    db: Session,
+# ============================================================================
+# MAIN CRUD FUNCTIONS
+# ============================================================================
+
+def create_chatbot(
+    request: Request,
     chatbot_name: str,
     status: str,
     description: Optional[str] = None,
@@ -204,106 +162,80 @@ def create_chatbot_service(
     generated_by: Optional[uuid.UUID] = None,
     meta_data: Optional[Dict[str, Any]] = None,
     mode: Optional[str] = "general",
-    questions: Optional[dict] = None,   
-    background_tasks: Optional[BackgroundTasks] = None
+    questions: Optional[dict] = None,
+    employee_ids: Optional[List[str]] = None,
+    background_tasks: Optional[BackgroundTasks] = None,
+    db: Session=Depends(get_db)
 ) -> Chatbot:
-    """
-    Create a chatbot and schedule background embedding task.
-    
-    Chatbot names must be unique.
-    Supports multiple document formats: PDF, DOCX, DOC, TXT, RTF
-    
-    Args:
-        db: Database session
-        chatbot_name: Name of the chatbot (must be unique)
-        status: Status of the chatbot
-        description: Optional description
-        instruction: Optional instructions
-        doc_contents: List of document file contents (bytes)
-        doc_names: List of document filenames
-        generated_by: UUID of creator
-        meta_data: Additional metadata
-        background_tasks: FastAPI background tasks
-        
-    Returns:
-        Created chatbot instance
-        
-    Raises:
-        HTTPException: If chatbot name already exists
-    """
+    """Create chatbot and schedule document processing."""
     try:
-        # Check if chatbot name already exists
-        existing_chatbot = db.query(Chatbot).filter(
+        user_info = get_current_employee_from_token(request, db)
+        
+        user_id = user_info.employee_id
+        # Check uniqueness
+        existing = db.query(Chatbot).filter(
             Chatbot.chatbot_name == chatbot_name
         ).first()
         
-        if existing_chatbot:
+        if existing:
             raise HTTPException(
                 status_code=400,
-                detail=f"Chatbot with name '{chatbot_name}' already exists. Please use a unique name."
+                detail=f"Chatbot '{chatbot_name}' already exists"
             )
         
-        new_chatbot = Chatbot(
+        # Create chatbot record
+        chatbot = Chatbot(
             chatbot_name=chatbot_name,
             description=description,
             instruction=instruction,
-            pdf_names=doc_names or [],  # Store all document names
+            pdf_names=doc_names or [],
             status=status,
             mode=mode,
             generated_by=generated_by,
             meta_data=meta_data or {}
         )
         
-        db.add(new_chatbot)
+        db.add(chatbot)
         db.commit()
-        db.refresh(new_chatbot)
+        db.refresh(chatbot)
         
-        log.info(
-            f"Chatbot '{chatbot_name}' created with ID {new_chatbot.chatbot_id}"
-        )
+        log.info(f" Chatbot created: {chatbot_name} (ID: {chatbot.chatbot_id})")
+        
+        if questions and mode in ("quiz", "people_analyzer"):
+            save_questions(db, chatbot.chatbot_id, questions)
 
-        if questions and mode == "quiz":
-            existing_questions= db.query(Question).filter(Question.chatbot_id == new_chatbot.chatbot_id).first()
-            if not existing_questions:
-                new_questions = Question(
-                    chatbot_id=new_chatbot.chatbot_id,
-                    question_data=questions
-                )
-                db.add(new_questions)
-                db.commit()
-                db.refresh(new_questions)
-            else:
-                existing_questions.question_data = questions
-                db.commit()
-                db.refresh(existing_questions)    
-                
-                   
-        # Schedule background embedding task if documents exist
+        if employee_ids:
+            # Create access record
+            access_record = ChatbotAccess(
+                chatbot_id=chatbot.chatbot_id,
+                employee_id=user_id,
+                allowed_users=employee_ids
+            )
+            db.add(access_record)
+            db.commit()
+            log.info(f"Allowed users set for chatbot {chatbot_name}")
+        
+        # Schedule document processing
         if doc_contents and doc_names and background_tasks:
             background_tasks.add_task(
-                _process_documents_and_store_embeddings,
+                process_documents_background,
                 chatbot_name=chatbot_name,
                 doc_contents=doc_contents,
                 doc_names=doc_names
             )
-            log.info(
-                f"Background task started for processing {len(doc_names)} "
-                f"documents of '{chatbot_name}'"
-            )
+            log.info(f"📋 Scheduled: {len(doc_names)} documents")
         
-        return new_chatbot
-        
+        return chatbot
+    
     except HTTPException:
-        # Re-raise HTTP exceptions (like duplicate name)
         raise
     except Exception as e:
         db.rollback()
-        log.error(f"Failed to create chatbot '{chatbot_name}': {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to create chatbot: {str(e)}"
-        )
-def update_chatbot_service(
+        log.error(f"❌ Create failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def update_chatbot(
     db: Session,
     chatbot_id: uuid.UUID,
     chatbot_name: Optional[str] = None,
@@ -317,19 +249,16 @@ def update_chatbot_service(
     questions: Optional[dict] = None,
     background_tasks: Optional[BackgroundTasks] = None
 ) -> Chatbot:
-    """
-    Update chatbot details and handle quiz questions & documents.
-    """
-
+    """Update chatbot."""
     try:
         chatbot = db.query(Chatbot).filter(
             Chatbot.chatbot_id == chatbot_id
         ).first()
-
+        
         if not chatbot:
             raise HTTPException(status_code=404, detail="Chatbot not found")
-
-        # Unique name check
+        
+        # Check name uniqueness if changing
         if chatbot_name and chatbot_name != chatbot.chatbot_name:
             exists = db.query(Chatbot).filter(
                 Chatbot.chatbot_name == chatbot_name,
@@ -341,8 +270,8 @@ def update_chatbot_service(
                     detail="Chatbot name already exists"
                 )
             chatbot.chatbot_name = chatbot_name
-
-        # Update fields only if provided
+        
+        # Update fields
         if status:
             chatbot.status = status
         if description is not None:
@@ -353,448 +282,296 @@ def update_chatbot_service(
             chatbot.meta_data = meta_data
         if mode:
             chatbot.mode = mode
-
-        # Replace documents if provided
         if doc_names:
             chatbot.pdf_names = doc_names
-
+        
         db.commit()
         db.refresh(chatbot)
-
-        # ---- QUIZ QUESTION HANDLING ----
+        
+        # Update questions if quiz mode
         if questions and chatbot.mode == "quiz":
-            existing_questions = db.query(Question).filter(
-                Question.chatbot_id == chatbot.chatbot_id
-            ).first()
-
-            if existing_questions:
-                existing_questions.question_data = questions
-                db.commit()
-                db.refresh(existing_questions)
-            else:
-                new_questions = Question(
-                    chatbot_id=chatbot.chatbot_id,
-                    question_data=questions
-                )
-                db.add(new_questions)
-                db.commit()
-                db.refresh(new_questions)
-
-        # ---- BACKGROUND DOCUMENT PROCESSING ----
+            save_questions(db, chatbot.chatbot_id, questions)
+        
+        # Process new documents
         if doc_contents and doc_names and background_tasks:
             background_tasks.add_task(
-                _process_documents_and_store_embeddings,
+                process_documents_background,
                 chatbot_name=chatbot.chatbot_name,
                 doc_contents=doc_contents,
                 doc_names=doc_names
             )
-
-        log.info(f"Chatbot updated successfully: {chatbot.chatbot_id}")
+        
+        log.info(f"✓ Chatbot updated: {chatbot.chatbot_id}")
         return chatbot
-
+    
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
-        log.error(f"Failed to update chatbot {chatbot_id}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to update chatbot: {str(e)}"
-        )
+        log.error(f"❌ Update failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-def search_similar_chunks(
-    chatbot_name: str,
-    query: str,
-    top_k: int = 5,
-    document_type: Optional[str] = None,
-    min_score: float = 0.5  # New: minimum similarity score threshold
-) -> List[Dict[str, Any]]:
-    """
-    Search for similar chunks in Qdrant for a given query.
-    
-    Args:
-        chatbot_name: Name of the chatbot (collection name)
-        query: Search query text
-        top_k: Number of results to return
-        document_type: Optional filter by document type (pdf, docx, txt, etc.)
-        min_score: Minimum similarity score to consider a chunk relevant
-        
-    Returns:
-        List of similar chunks with scores and metadata
-    """
+def delete_chatbot_by_id(db: Session, chatbot_id: uuid.UUID) -> bool:
+    """Delete chatbot and its vector collection."""
     try:
-        client = qdrant_manager.get_client()
-        if not client:
-            raise HTTPException(
-                status_code=503,
-                detail="Qdrant service unavailable"
-            )
-        
-        collection_name = _sanitize_collection_name(chatbot_name)
-        
-        # Check if collection exists
-        existing_collections = [col.name for col in client.get_collections().collections]
-        if collection_name not in existing_collections:
-            log.warning(f"Collection {collection_name} not found")
-            return []
-        
-        # Generate embedding for query
-        query_embedding = generate_embedding(query)
-        
-        # Build filter if document_type specified
-        query_filter = None
-        if document_type:
-            from qdrant_client.models import Filter, FieldCondition, MatchValue
-            query_filter = Filter(
-                must=[
-                    FieldCondition(
-                        key="document_type",
-                        match=MatchValue(value=document_type)
-                    )
-                ]
-            )
-        
-        
-        from qdrant_client.models import  VectorInput
-
-        # New search using the current API
-        response = client.query_points(
-            collection_name=collection_name,
-            query=query_embedding,  # Directly pass the list[float] embedding vector
-            limit=top_k,
-            with_payload=True,
-            with_vectors=False,
-            query_filter=query_filter,
-        )
-
-        results = response.points
-        
-        # Format results, filtering by min_score
-        chunks = []
-        for result in results:
-            if float(result.score) >= min_score:
-                chunks.append({
-                    'text': result.payload.get('text'),
-                    'source_file': result.payload.get('source_file'),
-                    'document_type': result.payload.get('document_type'),
-                    'chunk_index': result.payload.get('chunk_index'),
-                    'total_chunks': result.payload.get('total_chunks'),
-                    'score': float(result.score),
-                    'metadata': result.payload
-                })
-        
-        log.info(
-            f"Found {len(chunks)} similar chunks (after min_score filter) for query in chatbot '{chatbot_name}'"
-        )
-        
-        return chunks
-        
-    except Exception as e:
-        log.error(f"Error searching similar chunks: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error searching chunks: {str(e)}"
-        )
-
-
-def get_chatbot_context(
-    chatbot_name: str,
-    query: str, 
-    max_context_length: int = 3000,
-    document_type: Optional[str] = None,
-    min_chunk_chars: int = 20,  # Skip very short or meaningless chunks
-    min_score: float = 0.5  # New: pass min_score to search
-) -> str:
-    """
-    Get relevant context for a query by searching similar chunks.
-    Now robust: skips empty/None text chunks and logs sample content for debugging.
-    """
-    try:
-        chunks = search_similar_chunks(
-            chatbot_name=chatbot_name, 
-            query=query, 
-            top_k=10,
-            document_type=document_type,
-            min_score=min_score  # New: pass min_score
-        )
-        
-        if not chunks:
-            log.info(f"No chunks retrieved for query in chatbot '{chatbot_name}'")
-            return ""
-        
-        # Debug: Log first few chunks to see if text is present
-        for i, chunk in enumerate(chunks[:3]):
-            text_snippet = str(chunk.get('text', '') or '')[:100].replace('\n', ' ')
-            log.info(
-                f"Sample chunk {i} - source: {chunk.get('source_file')}, "
-                f"text_len: {len(str(chunk.get('text', '') or ''))}, "
-                f"score: {chunk.get('score'):.3f}, snippet: {text_snippet}"
-            )
-        
-        context_parts = []
-        total_length = 0
-        
-        for chunk in chunks:
-            raw_text = chunk.get('text')
-            text = str(raw_text).strip() if raw_text is not None else ""
-            
-            # Skip empty or too-short chunks
-            if not text or len(text) < min_chunk_chars:
-                continue
-                
-            source = chunk.get('source_file', 'Unknown')
-            doc_type = chunk.get('document_type', 'unknown')
-            
-            chunk_text = f"[Source: {source} ({doc_type})]\n{text}\n"
-            chunk_length = len(chunk_text)
-            
-            if total_length + chunk_length > max_context_length:
-                log.info(f"Context length limit reached ({total_length}/{max_context_length} chars)")
-                break
-            
-            context_parts.append(chunk_text)
-            total_length += chunk_length
-        
-        context = "\n---\n".join(context_parts)
-        
-        log.info(
-            f"Built context of {total_length} chars from {len(context_parts)} valid chunks "
-            f"for chatbot '{chatbot_name}'"
-        )
-        
-        return context
-        
-    except Exception as e:
-        log.error(f"Error building chatbot context: {e}", exc_info=True)
-        return ""
-
-def delete_chatbot_service(db: Session, chatbot_name: str) -> bool:
-    """
-    Delete a chatbot and its associated Qdrant collection.
-    
-    Args:
-        db: Database session
-        chatbot_name: Name of the chatbot to delete
-        
-    Returns:
-        True if successfully deleted, False otherwise
-        
-    Raises:
-        HTTPException: If chatbot not found or deletion fails
-    """
-    try:
-        # Find chatbot
         chatbot = db.query(Chatbot).filter(
-            Chatbot.chatbot_name == chatbot_name
+            Chatbot.chatbot_id == chatbot_id
         ).first()
         
         if not chatbot:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Chatbot '{chatbot_name}' not found"
-            )
+            raise HTTPException(status_code=404, detail="Chatbot not found")
         
-        # Delete from Qdrant
-        client = qdrant_manager.get_client()
-        if client:
-            collection_name = _sanitize_collection_name(chatbot_name)
-            existing_collections = [col.name for col in client.get_collections().collections]
-            
-            if collection_name in existing_collections:
-                client.delete_collection(collection_name=collection_name)
-                log.info(f"Deleted Qdrant collection: {collection_name}")
+        chatbot_name = chatbot.chatbot_name
         
-        # Delete from database
+        # Delete vector collection
+        delete_collection(chatbot_name)
+        
+        # Delete questions
+        db.query(Question).filter(Question.chatbot_id == chatbot_id).delete()
+        
+        # Delete chatbot
         db.delete(chatbot)
         db.commit()
         
-        log.info(f"Chatbot '{chatbot_name}' deleted successfully")
+        log.info(f"🗑️  Chatbot deleted: {chatbot_name}")
         return True
-        
+    
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
-        log.error(f"Failed to delete chatbot '{chatbot_name}': {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to delete chatbot: {str(e)}"
-        )
-        
-        
-        
-"""
-Clean RAG (Retrieval-Augmented Generation) Service Function
-Handles query processing, context retrieval, and response generation in one call.
-"""
+        log.error(f"❌ Delete failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-def rag_query_service(
-    chatbot_name: str,
-    query: str,
-    chatbot_mode: str = "chatbot",  # "chatbot" or "quiz"
-    chatbot_instructions: Optional[str] = None,
-    conversation_history: Optional[List[Dict[str, str]]] = None,
-    model_name: Optional[str] = None,
-    top_k: int = 10,
-    max_context_length: int = 4000,
-    max_retries: int = 3,
-    min_relevance_score: float = 0.55  # Increased threshold for more reliable relevance
-) -> Dict:
-    """
-    Enhanced RAG service that behaves like a natural, consistent chatbot.
-    Handles greetings, casual chat, and document-based questions seamlessly.
-    """
-    try:
-        log.info(f"Processing query for chatbot '{chatbot_name}': {query[:60]}...")
+def get_chatbot_responses_service(
+    chatbot_id: uuid.UUID,
+    department: Optional[str],
+    db: Session
+) -> Dict[str, Any]:
+    """Main service to route based on mode."""
+    chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
+    if not chatbot:
+        raise HTTPException(status_code=404, detail="Chatbot not found")
 
-        # Retrieve potentially relevant context
-        context = get_chatbot_context(
-            chatbot_name=chatbot_name,
-            query=query,
-            max_context_length=max_context_length,
-            min_score=min_relevance_score  # Only include truly relevant chunks
-        )
+    if chatbot.mode == "quiz":
+        return get_quiz_responses(chatbot_id, db)
+    elif chatbot.mode == "people_analyzer":
+        return get_people_analyzer_responses(chatbot_id, department, db)
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported chatbot mode")
 
-        resolved_model = model_name or config.GEMINI_MODEL
 
-        # Base personality/instructions
-        base_instructions = chatbot_instructions or (
-            "You are a friendly, knowledgeable, and helpful assistant. "
-            "You answer clearly, concisely, and naturally. "
-            "You remember the conversation and respond in a consistent tone."
-        )
-
-        # Unified prompt – works whether context is present or not
-        prompt = f"""Relevant Document Context (use ONLY if directly relevant to the user's question):
-{context if context else "(No relevant document information found)"}
-
-Conversation Instructions:
-{base_instructions}
-
-Important Rules:
-- Answer naturally, as if the knowledge is your own. Never say "based on the documents", "according to the context", or mention sources unless the user explicitly asks for them.
-- If the user's message is a greeting (hi, hello, how are you, etc.), casual chat, or off-topic, respond warmly and conversationally. Ignore the document context in these cases.
-- If the question is clearly related to the documents and the context above helps, use it to give an accurate answer.
-- Keep responses engaging, friendly, and appropriate to the conversation flow.
-- Do not hallucinate information not supported by the context when answering document-related questions.
-
-User's message: {query}
-
-Respond directly and naturally."""
-
-        log.info(f"Generating response with {resolved_model} (context length: {len(context) if context else 0})")
-
-        response_obj = _generate_with_retry(
-            prompt=prompt,
-            conversation_history=conversation_history,
-            model_name=resolved_model,
-            max_retries=max_retries
-        )
-
-        # Only return sources if we actually used meaningful context
-        has_meaningful_context = bool(context and context.strip() and context != "(No relevant document information found)")
-        
-        if has_meaningful_context:
-            chunks = search_similar_chunks(
-                chatbot_name=chatbot_name,
-                query=query,
-                top_k=top_k,
-                min_score=min_relevance_score
-            )
-            sources = [
-                {
-                    "source_file": chunk['source_file'],
-                    "document_type": chunk['document_type'],
-                    "relevance_score": round(chunk['score'], 3),
-                    "chunk_index": chunk['chunk_index']
-                }
-                for chunk in chunks
-                if chunk.get('text') and len(str(chunk['text']).strip()) >= 20
-            ]
-        else:
-            sources = []
-
-        return {
-            "response": response_obj.text.strip(),
-            "sources": sources,
-            "context_used": has_meaningful_context,
-            "num_chunks_used": len(sources)
-        }
-
-    except Exception as e:
-        log.error(f"RAG query failed: {str(e)}", exc_info=True)
-        return {
-            "response": "Sorry, I'm having trouble right now. Please try again in a moment!",
-            "sources": [],
-            "context_used": False,
-            "error": str(e)
-        }
-        
-def _map_role_for_gemini(role_name: str) -> str:
-    """Maps internal or non-standard roles to the Gemini API's required roles ('user', 'model')."""
-    role_name_lower = role_name.lower()
-
-    if role_name_lower == 'user':
-        return 'user'
-
-    if role_name_lower in ['model', 'assistant','bot', 'ai', 'system']:
-        return 'model'
-    return 'user'
-
-# --- Main Generation Function ---
-def _generate_with_retry(
-    prompt: str,
-    conversation_history: Optional[List[Dict[str, str]]],
-    model_name: str,
-    max_retries: int
-):
-    """
-    Generates content using the Gemini API, implementing retry logic 
-    for rate limit errors.
-    """
-    backoff = 2
-    last_error = None
+def get_quiz_responses(chatbot_id: uuid.UUID, db: Session) -> Dict[str, Any]:
+    """Get all quiz attempts with question text and options in answers."""
     
-    for attempt in range(1, max_retries + 1):
-        try:
-            model = genai.GenerativeModel(model_name)
-            
-            if conversation_history:
-                # 1. Map and format the history list for the Gemini API
-                history_for_gemini = [
-                    {
-                        # Use the helper function to ensure valid roles
-                        "role": _map_role_for_gemini(msg["role"]), 
-                        # Use "text" key inside parts, as required by the API's Content object format
-                        "parts": [{"text": msg["content"]}] 
-                    } 
-                    for msg in conversation_history
-                ]
-                
-                # 2. Start chat with the corrected history
-                chat = model.start_chat(history=history_for_gemini)
-                return chat.send_message(prompt)
-            
-            # If no conversation history, use generate_content directly
-            return model.generate_content(prompt)
-            
-        except Exception as e:
-            msg = str(e)
-            last_error = e
-            
-            # Rate Limit Retry Logic
-            if ("429" in msg or "quota" in msg.lower() or "rate" in msg.lower()) and attempt < max_retries:
-                log.warning(f"Rate limit hit (attempt {attempt}); retrying after {backoff}s")
-                time.sleep(backoff)
-                backoff *= 2
+    # Fetch active questions to get text and options
+    questions_raw = db.query(Question)\
+        .filter(Question.chatbot_id == chatbot_id, Question.status == "active")\
+        .all()
+
+    # Build question map: id -> {text, options}
+    question_map = {}
+    for q in questions_raw:
+        data_list = q.question_data
+        if isinstance(data_list, list):
+            for item in data_list:
+                qid = item.get("id")
+                if qid is not None:
+                    question_map[qid] = {
+                        "text": item.get("text"),
+                        "options": item.get("options", []),
+                        "type": item.get("type", "mcq")
+                    }
+
+    # Fetch attempts
+    attempts = db.query(Answer)\
+        .filter(Answer.chatbot_id == chatbot_id)\
+        .order_by(Answer.created_at.desc())\
+        .all()
+
+    if not attempts:
+        return {
+            "mode": "quiz",
+            "chatbot_id": str(chatbot_id),
+            "total_attempts": 0,
+            "attempts": []
+        }
+
+    formatted_attempts = []
+
+    for attempt in attempts:
+        answers_data = attempt.answer_data or {}
+        employee = db.query(Employee)\
+            .filter(Employee.employee_id == attempt.attempter_by_id)\
+            .first()
+
+        detailed_answers = []
+        attempted_count = 0
+
+        for q_id_str, ans_obj in answers_data.items():
+            try:
+                q_id = int(q_id_str)
+            except:
                 continue
-            
-            # Break if it's a permanent error (like 400 InvalidArgument) or max retries reached
-            break
-            
-    # Raise the last error encountered (which was likely the 400 InvalidArgument error)
-    raise last_error or RuntimeError("Gemini generation failed after retries")
 
+            answer_value = ans_obj.get("answer") if isinstance(ans_obj, dict) else ans_obj
+            is_skipped = answer_value == "skipped" or (isinstance(ans_obj, dict) and ans_obj.get("answer") == "skipped")
 
+            question_info = question_map.get(q_id, {"text": f"Question {q_id}", "options": [], "type": "mcq"})
+
+            detailed_answers.append({
+                "question_id": q_id,
+                "question_text": question_info["text"],
+                "type": question_info["type"],
+                "options": question_info["options"],
+                "selected_answer": "Skipped" if is_skipped else answer_value
+            })
+
+            if not is_skipped:
+                attempted_count += 1
+
+        # Sort by question_id
+        detailed_answers.sort(key=lambda x: x["question_id"])
+
+        formatted_attempts.append({
+            "attempt_id": str(attempt.id),
+            "employee_id": attempt.attempter_by_id  ,
+            "employee_name": employee.employee_name if employee else "Unknown",
+            "department": employee.department if employee else None,
+            "attempted_count": attempted_count,
+            "total_questions": len(answers_data),
+            "answers": detailed_answers,
+            "created_at": attempt.created_at.isoformat()
+        })
+
+    return {
+        "mode": "quiz",
+        "chatbot_id": str(chatbot_id),
+        "total_attempts": len(formatted_attempts),
+        "attempts": formatted_attempts
+    }
+def get_people_analyzer_responses(
+    chatbot_id: uuid.UUID,
+    department: Optional[str],
+    db: Session
+) -> Dict[str, Any]:
+    """Aggregated responses for people_analyzer with overall average rating."""
+    
+    # Fetch questions
+    questions_raw = db.query(Question)\
+        .filter(Question.chatbot_id == chatbot_id, Question.status == "active")\
+        .all()
+
+    questions = []
+    for q in questions_raw:
+        data_list = q.question_data
+        if isinstance(data_list, list):
+            for item in data_list:
+                questions.append({
+                    "id": item.get("id"),
+                    "text": item.get("text"),
+                    "category": item.get("category"),
+                    "order": item.get("order", 999)
+                })
+        else:
+            questions.append({
+                "id": data_list.get("id"),
+                "text": data_list.get("text"),
+                "category": data_list.get("category"),
+                "order": data_list.get("order", 999)
+            })
+
+    questions.sort(key=lambda x: x.get("order", 999))
+
+    # Fetch ratings
+    query = db.query(PeopleAnalyzer, Employee.employee_name, Employee.department)\
+        .join(Employee, PeopleAnalyzer.employee_id == Employee.employee_id)\
+        .filter(PeopleAnalyzer.chatbot_id == chatbot_id)
+
+    if department:
+        query = query.filter(Employee.department.ilike(f"%{department}%"))
+
+    entries = query.all()
+
+    if not entries:
+        return {
+            "mode": "people_analyzer",
+            "chatbot_id": str(chatbot_id),
+            "questions": questions,
+            "filters_applied": {"department": department},
+            "aggregated_data": []
+        }
+
+    # Group by rated employee
+    grouped: Dict[str, Dict] = {}
+
+    for entry, employee_name, emp_department in entries:
+        emp_id = entry.employee_id
+        if emp_id not in grouped:
+            grouped[emp_id] = {
+                "employee_id": emp_id,
+                "employee_name": employee_name or "Unknown",
+                "department": emp_department or "Unknown",
+                "total_ratings": 0,
+                "question_stats": {},
+                "total_sum": 0,
+                "total_count": 0
+            }
+
+        grouped[emp_id]["total_ratings"] += 1
+
+        answers = entry.answers or {}
+        for q_id_str, ans_obj in answers.items():
+            answer = ans_obj.get("answer") if isinstance(ans_obj, dict) else ans_obj
+            if answer == "skipped" or answer is None:
+                continue
+
+            if q_id_str not in grouped[emp_id]["question_stats"]:
+                grouped[emp_id]["question_stats"][q_id_str] = {"sum": 0, "count": 0}
+
+            score = {"+": 4, "-": 0, "+-": 2}.get(str(answer).strip(), 0)
+            grouped[emp_id]["question_stats"][q_id_str]["sum"] += score
+            grouped[emp_id]["question_stats"][q_id_str]["count"] += 1
+
+            # Add to overall total
+            grouped[emp_id]["total_sum"] += score
+            grouped[emp_id]["total_count"] += 1
+
+    # Final aggregation
+    aggregated_data = []
+    for emp_id, data in grouped.items():
+        question_averages = {}
+        for q_id, stats in data["question_stats"].items():
+            avg = stats["sum"] / stats["count"] if stats["count"] > 0 else 0
+            question_averages[q_id] = {
+                "average": round(avg, 2),
+                "count": stats["count"]
+            }
+
+        overall_average = (
+            round(data["total_sum"] / data["total_count"], 2)
+            if data["total_count"] > 0
+            else 0
+        )
+
+        aggregated_data.append({
+            "employee_id": data["employee_id"],
+            "employee_name": data["employee_name"],
+            "department": data["department"],
+            "total_ratings": data["total_ratings"],
+            "overall_average": overall_average,  # New field
+            "question_averages": question_averages
+        })
+
+    # Sort by overall_average descending (highest rated first)
+    aggregated_data.sort(key=lambda x: x["overall_average"], reverse=True)
+
+    return {
+        "mode": "people_analyzer",
+        "chatbot_id": str(chatbot_id),
+        "questions": questions,
+        "filters_applied": {"department": department},
+        "aggregated_data": aggregated_data
+    }
