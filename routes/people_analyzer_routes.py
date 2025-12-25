@@ -27,6 +27,7 @@ router = APIRouter(
     tags=["People Analyzer"]
 )
 
+
 @router.get("/employees")
 def get_employees(
     request: Request,
@@ -52,7 +53,7 @@ def get_employees(
     """
     try:
         user_info = get_current_employee_from_token(request, db)
-        user_id = user_info["id"]
+        user_id = user_info.id
         # user_id ="8196fec7-a57c-4d71-8922-cad80cc2ea4d"
         result = get_employees_service(
             db=db,
