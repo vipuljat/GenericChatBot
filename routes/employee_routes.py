@@ -234,6 +234,7 @@ def get_current_employee(
         "employee_id": employee.employee_id,
         "employee_name": employee.employee_name,
         "employee_email": employee.employee_email,
+        "employee_code": employee.employee_code,
         "employee_role": employee.employee_role,
         "department": employee.department,
         "is_admin": employee.employee_role == "admin",
@@ -375,7 +376,7 @@ def update_employee_service(
 @router.post("/employees/create", summary="Create a new employee")
 def create_employee(
     request: Request,
-    employee_id: str = Form(...),
+    employee_id: Optional[str] = Form(None),
     employee_name: str = Form(...),
     employee_email: Optional[str] = Form(None),
     employee_role: str = Form("employee"),
