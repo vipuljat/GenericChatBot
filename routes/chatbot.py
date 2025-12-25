@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from agent.agent import render_quiz_questions
 from stateful_services.database import get_db
-from stateful_services.db_schema import Chatbot, PeopleAnalyzer, Question, Answer
+from stateful_services.db_schema import Chatbot, PeopleAnalyzer, Question, Answer, Employee, ChatbotPermission
 from utils.document_service import is_supported_document, get_supported_extensions
 from utils.logging import log
 
@@ -63,9 +63,10 @@ async def create_chatbot_endpoint(
     instruction: Optional[str] = Form(None),
     generated_by: Optional[str] = Form(None),
     meta_data: Optional[str] = Form(None),
-    documents: List[UploadFile] = File(...),
+    documents: List[UploadFile] = File(default=[]),
     mode: Optional[str] = Form("general"),
     questions: Optional[str] = Form(None),
+    employee_ids: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
@@ -97,6 +98,7 @@ async def create_chatbot_endpoint(
     meta_dict = json.loads(meta_data) if meta_data else {}
     parsed_questions = json.loads(questions) if questions else None
     generated_by_uuid = uuid.UUID(generated_by) if generated_by else None
+    parsed_employee_ids = json.loads(employee_ids) if employee_ids else []
     
     # Create chatbot (functional call)
     chatbot = create_chatbot(
@@ -114,11 +116,43 @@ async def create_chatbot_endpoint(
         background_tasks=background_tasks
     )
     
+    # Create ChatbotPermission entries for selected employees
+    if parsed_employee_ids and len(parsed_employee_ids) > 0:
+        log.info(f"Creating permissions for {len(parsed_employee_ids)} employees")
+        for emp_id_str in parsed_employee_ids:
+            try:
+                # Find the employee by employee_id (string) to get the UUID (id)
+                employee = db.query(Employee).filter(Employee.employee_id == str(emp_id_str)).first()
+                if employee:
+                    # Check if permission already exists
+                    existing = db.query(ChatbotPermission).filter(
+                        ChatbotPermission.chatbot_id == chatbot.chatbot_id,
+                        ChatbotPermission.employee_id == employee.id
+                    ).first()
+                    
+                    if not existing:
+                        permission = ChatbotPermission(
+                            chatbot_id=chatbot.chatbot_id,
+                            employee_id=employee.id,
+                            created_by=generated_by_uuid
+                        )
+                        db.add(permission)
+                        log.info(f"✓ Permission created for employee {emp_id_str}")
+                    else:
+                        log.info(f"Permission already exists for employee {emp_id_str}")
+                else:
+                    log.warning(f"Employee not found: {emp_id_str}")
+            except Exception as e:
+                log.error(f"Error creating permission for employee {emp_id_str}: {e}")
+        
+        db.commit()
+    
     return {
         "chatbot_id": str(chatbot.chatbot_id),
         "chatbot_name": chatbot.chatbot_name,
         "status": chatbot.status,
         "document_count": len(doc_names),
+        "permissions_created": len(parsed_employee_ids) if parsed_employee_ids else 0,
         "message": f"Chatbot created. Processing {len(doc_names)} documents in background."
     }
 
