@@ -17,7 +17,7 @@ from fastapi import HTTPException, BackgroundTasks, Request
 from qdrant_client.models import PointStruct
 
 from stateful_services.database import get_db
-from stateful_services.db_schema import Answer, Chatbot, ChatbotAccess, Employee, PeopleAnalyzer, Question
+from stateful_services.db_schema import Answer, Chatbot, ChatbotAccess, ChatbotPermission, Employee, PeopleAnalyzer, Question
 from utils.document_service import extract_text_from_document, get_file_extension
 from utils.logging import log
 
@@ -164,6 +164,7 @@ def create_chatbot(
     mode: Optional[str] = "general",
     questions: Optional[dict] = None,
     employee_ids: Optional[List[str]] = None,
+    access_list: Optional[List[str]] = None,
     background_tasks: Optional[BackgroundTasks] = None,
     db: Session=Depends(get_db)
 ) -> Chatbot:
@@ -191,7 +192,7 @@ def create_chatbot(
             pdf_names=doc_names or [],
             status=status,
             mode=mode,
-            generated_by=generated_by,
+            generated_by=user_id,
             meta_data=meta_data or {}
         )
         
@@ -208,13 +209,31 @@ def create_chatbot(
             # Create access record
             access_record = ChatbotAccess(
                 chatbot_id=chatbot.chatbot_id,
-                employee_id=user_id,
+                created_by=user_id,
                 allowed_users=employee_ids
             )
             db.add(access_record)
             db.commit()
             log.info(f"Allowed users set for chatbot {chatbot_name}")
         
+        if access_list and mode == "people_analyzer":
+            for entry in access_list:
+                employee_id = entry.get("employee_id")
+                allowed_to_review = entry.get("allowed_users", [])
+
+                if not employee_id:
+                    continue
+
+                permission = ChatbotPermission(
+                    chatbot_id=chatbot.chatbot_id,
+                    created_by=user_id,
+                    reviewer_id=employee_id,            # reviwer
+                    can_review_users=allowed_to_review,    # people who reviewer can give feedback
+                )
+                db.add(permission)
+                db.commit()
+                log.info(f"Allowed feedback givers set for chatbot {chatbot_name}")
+            
         # Schedule document processing
         if doc_contents and doc_names and background_tasks:
             background_tasks.add_task(
@@ -223,7 +242,7 @@ def create_chatbot(
                 doc_contents=doc_contents,
                 doc_names=doc_names
             )
-            log.info(f"📋 Scheduled: {len(doc_names)} documents")
+            log.info(f"Scheduled: {len(doc_names)} documents")
         
         return chatbot
     
@@ -231,7 +250,7 @@ def create_chatbot(
         raise
     except Exception as e:
         db.rollback()
-        log.error(f"❌ Create failed: {e}", exc_info=True)
+        log.error(f" Create failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -247,32 +266,27 @@ def update_chatbot(
     doc_contents: Optional[List[bytes]] = None,
     doc_names: Optional[List[str]] = None,
     questions: Optional[dict] = None,
+    employee_ids: Optional[List[str]] = None,
+    access_list: Optional[List[Dict[str, Any]]] = None,  # [{"reviewer_id": "...", "can_review_users": [...]}]
     background_tasks: Optional[BackgroundTasks] = None
 ) -> Chatbot:
-    """Update chatbot."""
+
     try:
-        chatbot = db.query(Chatbot).filter(
-            Chatbot.chatbot_id == chatbot_id
-        ).first()
-        
+        chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
         if not chatbot:
             raise HTTPException(status_code=404, detail="Chatbot not found")
-        
-        # Check name uniqueness if changing
+
+        # Name uniqueness check
         if chatbot_name and chatbot_name != chatbot.chatbot_name:
-            exists = db.query(Chatbot).filter(
+            if db.query(Chatbot).filter(
                 Chatbot.chatbot_name == chatbot_name,
                 Chatbot.chatbot_id != chatbot_id
-            ).first()
-            if exists:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Chatbot name already exists"
-                )
+            ).first():
+                raise HTTPException(status_code=400, detail="Chatbot name already exists")
             chatbot.chatbot_name = chatbot_name
-        
-        # Update fields
-        if status:
+
+        # Basic scalar field updates
+        if status is not None:
             chatbot.status = status
         if description is not None:
             chatbot.description = description
@@ -280,19 +294,62 @@ def update_chatbot(
             chatbot.instruction = instruction
         if meta_data is not None:
             chatbot.meta_data = meta_data
-        if mode:
+        if mode is not None:
             chatbot.mode = mode
-        if doc_names:
+        if doc_names is not None:
             chatbot.pdf_names = doc_names
-        
+
+        # ── Update ChatbotAccess (who can access the chatbot) ──────────────────
+        if employee_ids is not None:
+            # We usually expect one record per chatbot from creator
+            access = db.query(ChatbotAccess).filter(
+                ChatbotAccess.chatbot_id == chatbot_id,
+                ChatbotAccess.created_by == chatbot.generated_by
+            ).first()
+
+            if access:
+                access.allowed_users = employee_ids
+            else:
+                access = ChatbotAccess(
+                    chatbot_id=chatbot_id,
+                    created_by=chatbot.generated_by,
+                    allowed_users=employee_ids
+                )
+                db.add(access)
+            log.info(f"Updated chatbot access (visibility) for {chatbot.chatbot_name}")
+
+        # ── Update ChatbotPermission (review permissions) ──────────────────────
+        if access_list is not None:
+            # Full replace strategy (common & simple)
+            db.query(ChatbotPermission).filter(
+                ChatbotPermission.chatbot_id == chatbot_id
+            ).delete()
+
+            for entry in access_list:
+                reviewer_id = entry.get("reviewer_id") or entry.get("employee_id")
+                can_review_users = entry.get("allowed_users", [])
+
+                if not reviewer_id:
+                    continue
+
+                permission = ChatbotPermission(
+                    id=uuid.uuid4(),  # explicit if you want
+                    chatbot_id=chatbot.chatbot_id,
+                    reviewer_id=reviewer_id,
+                    can_review_users=can_review_users
+                )
+                db.add(permission)
+
+            log.info(f"Replaced review permissions (who can review whom) for {chatbot.chatbot_name}")
+
+        # Questions update - support both modes
+        if questions is not None and chatbot.mode in ("quiz", "people_analyzer"):
+            save_questions(db, chatbot.chatbot_id, questions)
+
         db.commit()
         db.refresh(chatbot)
-        
-        # Update questions if quiz mode
-        if questions and chatbot.mode == "quiz":
-            save_questions(db, chatbot.chatbot_id, questions)
-        
-        # Process new documents
+
+        # New documents in background
         if doc_contents and doc_names and background_tasks:
             background_tasks.add_task(
                 process_documents_background,
@@ -300,17 +357,16 @@ def update_chatbot(
                 doc_contents=doc_contents,
                 doc_names=doc_names
             )
-        
-        log.info(f"✓ Chatbot updated: {chatbot.chatbot_id}")
+
+        log.info(f"Chatbot updated successfully: {chatbot.chatbot_id}")
         return chatbot
-    
+
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
-        log.error(f"❌ Update failed: {e}", exc_info=True)
+        log.error(f"Update failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-
 
 def delete_chatbot_by_id(db: Session, chatbot_id: uuid.UUID) -> bool:
     """Delete chatbot and its vector collection."""

@@ -77,8 +77,8 @@ class ChatbotPermission(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     chatbot_id = Column(UUID(as_uuid=True),ForeignKey("chatbots.chatbot_id", ondelete="CASCADE"),nullable=False)
-    employee_id = Column(JSONB, nullable=False)
-    created_by = Column(UUID(as_uuid=True),ForeignKey("employees.id", ondelete="SET NULL"),nullable=True)
+    can_review_users = Column(JSONB, nullable=False)                                                                 # people who reviewer can give feedback     
+    reviewer_id = Column(UUID(as_uuid=True),ForeignKey("employees.id", ondelete="SET NULL"),nullable=True)       # reviwer
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -88,7 +88,7 @@ class ChatbotAccess(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     chatbot_id = Column(UUID(as_uuid=True),ForeignKey("chatbots.chatbot_id", ondelete="CASCADE"),nullable=False)
-    employee_id = Column(UUID(as_uuid=True),ForeignKey("employees.id", ondelete="SET NULL"),nullable=True)
+    created_by = Column(UUID(as_uuid=True),ForeignKey("employees.id", ondelete="SET NULL"),nullable=True)
     allowed_users=Column(JSONB, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
