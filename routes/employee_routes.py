@@ -373,7 +373,7 @@ def update_employee_service(
         )
         
         ##upload employee 
-@router.post("/employees/create", summary="Create a new employee")
+@router.post("/create", summary="Create a new employee")
 def create_employee(
     request: Request,
     employee_id: Optional[str] = Form(None),
@@ -388,9 +388,9 @@ def create_employee(
     Create a new employee (admin only).
     """
 
-    admin = require_admin(request, db)
+    # admin = require_admin(request, db)
 
-    log.info(f"Admin {admin.employee_email} creating employee {employee_id}")
+    # log.info(f"Admin {admin.employee_email} creating employee {employee_id}")
 
     meta_data_dict = None
     if meta_data:
@@ -421,7 +421,6 @@ def create_employee(
             "department": employee.department,
             "created_at": employee.created_at.isoformat() if hasattr(employee.created_at, "isoformat") else None,
         },
-        "created_by": admin.employee_email,
     }
 
 

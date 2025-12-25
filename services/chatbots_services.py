@@ -226,8 +226,7 @@ def create_chatbot(
 
                 permission = ChatbotPermission(
                     chatbot_id=chatbot.chatbot_id,
-                    created_by=user_id,
-                    reviewer_id=employee_id,            # reviwer
+                    reviewer_id=employee_id,               # reviwer
                     can_review_users=allowed_to_review,    # people who reviewer can give feedback
                 )
                 db.add(permission)
