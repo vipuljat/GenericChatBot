@@ -7,7 +7,11 @@ from sqlalchemy.orm import Session
 
 from agent.agent import render_quiz_questions
 from stateful_services.database import get_db
+<<<<<<< Updated upstream
 from stateful_services.db_schema import Chatbot, ChatbotAccess, PeopleAnalyzer, Question, Answer, Employee, ChatbotPermission
+=======
+from stateful_services.db_schema import Chatbot, PeopleAnalyzer, Question, Answer, Employee, ChatbotPermission, ChatbotAccess
+>>>>>>> Stashed changes
 from utils.document_service import is_supported_document, get_supported_extensions
 from utils.logging import log
 
@@ -35,6 +39,7 @@ class QueryRequest(BaseModel):
     history: Optional[List[dict]] = None
     user_id: Optional[str] = None
     employee_id: Optional[str] = None
+    is_quiz_answer: Optional[bool] = False  # Flag to indicate if this is a quiz answer
 
 
 class ChatbotUpdate(BaseModel):
@@ -264,15 +269,19 @@ async def get_chatbot_endpoint(
     if not chatbot:
         raise HTTPException(status_code=404, detail="Chatbot not found")
     
-    # Get questions if quiz mode
+    # Initialize common variables
     questions_data = None
+    access_list = []
+    employee_ids = []
+    
+    # Get questions if quiz mode
     if chatbot.mode in ("quiz", "people_analyzer"):
         questions = db.query(Question).filter(
             Question.chatbot_id == chatbot.chatbot_id
         ).first()
         questions_data = questions.question_data if questions else []
         
-        access_list = []
+        # Get permissions
         permissions = db.query(ChatbotPermission).filter(
             ChatbotPermission.chatbot_id == chatbot.chatbot_id
         ).all()
@@ -282,12 +291,11 @@ async def get_chatbot_endpoint(
                 "allowed_users": perm.can_review_users or []
             })
         
-        employee_ids = []
+        # Get allowed users
         access = db.query(ChatbotAccess).filter(
-        ChatbotAccess.chatbot_id == chatbot_id).first()
-
+            ChatbotAccess.chatbot_id == chatbot_id
+        ).first()
         employee_ids = access.allowed_users if access else []
-
     
     return {
         "chatbot_id": str(chatbot.chatbot_id),
@@ -340,6 +348,23 @@ async def query_chatbot_endpoint(
     
     # Route based on mode
     if chatbot_mode in ["quiz", "people_analyzer"]:
+        # If this is NOT a quiz answer (general query mid-quiz), use RAG
+        if not request.is_quiz_answer:
+            log.info("General query in quiz mode - using RAG")
+            result = generate_rag_response(
+                query=request.query,
+                chatbot_name=chatbot.chatbot_name,
+                chatbot_instructions=request.instructions or chatbot.instruction or "You are a helpful assistant.",
+                conversation_history=request.history or []
+            )
+            
+            return {
+                "mode": "general_in_quiz",
+                "response": result["response"],
+                "sources": result.get("sources", []),
+                "context_used": result.get("context_used", False)
+            }
+        
         # Quiz or People Analyzer mode (use same service)
         user_id = None
         employee_id = None
