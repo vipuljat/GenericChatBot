@@ -171,7 +171,7 @@ def create_chatbot(
     try:
         user_info = get_current_employee_from_token(request, db)
         
-        user_id = user_info.employee_id
+        user_id = user_info.id
         # Check uniqueness
         existing = db.query(Chatbot).filter(
             Chatbot.chatbot_name == chatbot_name
