@@ -42,6 +42,10 @@ class ChatbotUpdate(BaseModel):
     description: Optional[str] = None
     instruction: Optional[str] = None
     mode: Optional[str] = None
+    questions: Optional[List[Dict[str, Any]]] = None
+    employee_ids: Optional[List[str]]= None
+    access_list: Optional[List[str]]= None
+    
 
 
 class SubmitQuizRequest(BaseModel):
@@ -57,6 +61,7 @@ class SubmitQuizRequest(BaseModel):
 
 @router.post("/create", summary="Create chatbot with documents")
 async def create_chatbot_endpoint(
+    request: Request,
     chatbot_name: str = Form(...),
     status: str = Form(...),
     description: Optional[str] = Form(None),
@@ -66,7 +71,8 @@ async def create_chatbot_endpoint(
     documents: List[UploadFile] = File(default=[]),
     mode: Optional[str] = Form("general"),
     questions: Optional[str] = Form(None),
-    employee_ids: Optional[str] = Form(None),
+    employee_ids: Optional[List[str]] = Form([]),
+    access_list: Optional[List[str]] = Form([]),
     db: Session = Depends(get_db),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
@@ -102,6 +108,7 @@ async def create_chatbot_endpoint(
     
     # Create chatbot (functional call)
     chatbot = create_chatbot(
+        request=request,
         db=db,
         chatbot_name=chatbot_name,
         status=status,
@@ -111,6 +118,8 @@ async def create_chatbot_endpoint(
         doc_names=doc_names,
         generated_by=generated_by_uuid,
         meta_data=meta_dict,
+        employee_ids=employee_ids,
+        access_list=access_list,
         mode=mode,
         questions=parsed_questions,
         background_tasks=background_tasks
@@ -171,7 +180,10 @@ async def update_chatbot_endpoint(
         status=payload.status,
         description=payload.description,
         instruction=payload.instruction,
-        mode=payload.mode
+        mode=payload.mode,
+        questions=payload.questions,
+        employee_ids=payload.employee_ids,
+        access_list=payload.access_list,
     )
     
     return {

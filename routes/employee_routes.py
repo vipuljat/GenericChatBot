@@ -234,6 +234,7 @@ def get_current_employee(
         "employee_id": employee.employee_id,
         "employee_name": employee.employee_name,
         "employee_email": employee.employee_email,
+        "employee_code": employee.employee_code,
         "employee_role": employee.employee_role,
         "department": employee.department,
         "is_admin": employee.employee_role == "admin",
@@ -375,7 +376,7 @@ def update_employee_service(
 @router.post("/create", summary="Create a new employee")
 def create_employee(
     request: Request,
-    employee_id: str = Form(...),
+    employee_id: Optional[str] = Form(None),
     employee_name: str = Form(...),
     employee_email: Optional[str] = Form(None),
     employee_role: str = Form("employee"),
@@ -425,7 +426,7 @@ def create_employee(
 
 def create_employee_service(
     db: Session,
-    employee_id: str,
+    employee_id: Optional[str],
     employee_name: str,
     employee_email: Optional[str],
     employee_role: str,
@@ -438,11 +439,11 @@ def create_employee_service(
 
     try:
         # Check employee_id uniqueness
-        if db.query(Employee).filter(Employee.employee_id == employee_id).first():
-            raise HTTPException(
-                status_code=400,
-                detail="Employee with this employee_id already exists",
-            )
+        # if db.query(Employee).filter(Employee.employee_id == employee_id).first():
+        #     raise HTTPException(
+        #         status_code=400,
+        #         detail="Employee with this employee_id already exists",
+        #     )
 
         # Check email uniqueness
         if employee_email:
