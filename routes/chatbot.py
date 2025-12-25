@@ -394,14 +394,10 @@ async def query_chatbot_endpoint(
         intent = detect_intent(request.query)
         if intent == 'greeting' and not request.is_quiz_answer:
             log.info(f"👋 Greeting detected for '{chatbot.chatbot_name}'")
-            greeting_response = generate_greeting_response(chatbot.chatbot_name)
-            print(f"👋 Returning greeting: {greeting_response}")
             return {
-                "response": greeting_response,
                 "mode": chatbot_mode,
-                "intent": "greeting",
-                "sources": [],
-                "context_used": False
+                "response": generate_greeting_response(chatbot.chatbot_name),
+                "intent": "greeting"
             }
         
         log.info(f"🔍 Query for '{chatbot.chatbot_name}' ({chatbot_mode} mode, intent: {intent})")
