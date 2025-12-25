@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from typing import Optional, Dict, Any
 import uuid
 
-from stateful_services.db_schema import Employee, PeopleAnalyzer, Chatbot, Question
+from stateful_services.db_schema import Employee, PeopleAnalyzer, Chatbot, Question, ChatbotPermission
 from utils.logging import log
 
 # ==================================================
@@ -80,30 +80,28 @@ def get_people_analyzer_chatbot_service(
         return None
 
 
-# --------------------------------------------------
-# Service: Get Employees (Filtered + Search)
-# --------------------------------------------------
 def get_employees_service(
     db: Session,
     department: Optional[str] = None,
     role: Optional[str] = None,
     search: Optional[str] = None,
     include_chatbot: bool = False,
-):
+    chatbot_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    Fetch employees with optional filters and chatbot integration.
+    Fetch employees with optional filters.
     
-    Args:
-        db: Database session
-        department: Filter by department (optional)
-        role: Filter by employee role (optional)
-        search: Search by name or email (optional)
-        include_chatbot: Include people analyzer chatbot info (default: False)
+    When include_chatbot=True and chatbot_id is provided:
+    - If mode == "people_analyzer" and user is a reviewer:
+      → First apply department/role/search filters
+      → Then intersect with employees the current user is allowed to review
+    - Otherwise → return empty list for safety/privacy in people analyzer context
     
-    Returns:
-        Dict with employees list and optional chatbot info
+    This endpoint is specifically useful for People Analyzer flow.
     """
     try:
+        # Base query with standard filters
         query = db.query(Employee)
 
         if department:
@@ -120,31 +118,121 @@ def get_employees_service(
                 )
             )
 
-        employees = query.order_by(Employee.employee_name.asc()).all()
+        # Apply base filters first (department, role, search)
+        base_employees = query.order_by(Employee.employee_name.asc()).all()
+        log.debug(f"Base filtered employees count: {len(base_employees)}")
 
-        response = {
-            "employees": employees
+        response: Dict[str, Any] = {
+            "employees": base_employees,  # default
+            "people_analyzer_chatbot": None
         }
-        
-        # Include people analyzer chatbot if requested
-        if include_chatbot:
+
+        # People analyzer specific logic - applied on top
+        if include_chatbot and chatbot_id:
             try:
-                chatbot_info = get_people_analyzer_chatbot_service(db, department)
-                response["people_analyzer_chatbot"] = chatbot_info
-            except Exception as e:
-                log.error(f"Error fetching people analyzer chatbot: {e}")
-                response["people_analyzer_chatbot"] = None
-        
-        log.info(f"Retrieved {len(response['employees'])} employees")
-        return response
-    
-    except Exception as e:
-        log.error(f"Error in get_employees_service: {e}")
-        # Return empty result instead of raising exception
-        return {
-            "employees": []
-        }
+                # Parse chatbot_id
+                try:
+                    parsed_chatbot_id = uuid.UUID(chatbot_id)
+                except ValueError:
+                    log.warning(f"Invalid chatbot_id format: {chatbot_id}")
+                    response["people_analyzer_chatbot"] = {"error": "Invalid chatbot ID"}
+                    response["employees"] = []  # strict
+                    return response
 
+                # Get chatbot
+                chatbot = db.query(Chatbot).filter(
+                    Chatbot.chatbot_id == parsed_chatbot_id
+                ).first()
+
+                if not chatbot:
+                    response["people_analyzer_chatbot"] = {"error": "Chatbot not found"}
+                    response["employees"] = []
+                    return response
+
+                chatbot_info = {
+                    "chatbot_id": str(chatbot.chatbot_id),
+                    "name": chatbot.chatbot_name,
+                    "mode": chatbot.mode,
+                    "status": chatbot.status,
+                }
+                response["people_analyzer_chatbot"] = chatbot_info
+
+                # Only apply reviewer filtering in people_analyzer mode
+                if chatbot.mode != "people_analyzer" or not user_id:
+                    log.info(f"People analyzer filtering skipped: mode={chatbot.mode}, user_id={user_id}")
+                    return response
+
+                # Parse reviewer (user_id)
+                try:
+                    reviewer_uuid = uuid.UUID(user_id)
+                except ValueError:
+                    log.warning(f"Invalid user_id format: {user_id}")
+                    response["employees"] = []
+                    return response
+
+                # Find permission for this reviewer
+                permission = db.query(ChatbotPermission).filter(
+                    ChatbotPermission.chatbot_id == parsed_chatbot_id,
+                    ChatbotPermission.reviewer_id == reviewer_uuid
+                ).first()
+
+                if not permission or not permission.can_review_users:
+                    log.info(f"No review permission for user {user_id} in chatbot {chatbot_id}")
+                    response["employees"] = []
+                    return response
+
+                # Convert allowed subjects (str IDs → UUID)
+                try:
+                    allowed_subject_uuids = [
+                        uuid.UUID(str_sid.strip())
+                        for str_sid in permission.can_review_users
+                        if str_sid and str_sid.strip()
+                    ]
+                except ValueError as ve:
+                    log.error(f"Invalid UUID in can_review_users: {ve}")
+                    response["employees"] = []
+                    return response
+
+                if not allowed_subject_uuids:
+                    response["employees"] = []
+                    log.info(f"No subjects defined for reviewer {user_id}")
+                    return response
+
+                # Now filter the already filtered base_employees with allowed subjects
+                allowed_employee_ids = {emp.id for emp in base_employees}  # set of UUIDs
+                final_ids = allowed_employee_ids.intersection(set(allowed_subject_uuids))
+
+                if not final_ids:
+                    response["employees"] = []
+                else:
+                    response["employees"] = [
+                        emp for emp in base_employees
+                        if emp.id in final_ids
+                    ]
+                    # or alternatively re-query for consistency:
+                    # response["employees"] = db.query(Employee).filter(
+                    #     Employee.id.in_(final_ids)
+                    # ).order_by(Employee.employee_name.asc()).all()
+
+                log.info(
+                    f"People analyzer filter applied: {len(response['employees'])} "
+                    f"employees remain after reviewer permission"
+                )
+
+            except Exception as e:
+                log.error(f"People analyzer logic error: {e}", exc_info=True)
+                response["people_analyzer_chatbot"] = {"error": str(e)}
+                response["employees"] = []  # fail-safe
+
+        log.info(f"Final response contains {len(response['employees'])} employees")
+        return response
+
+    except Exception as e:
+        log.error(f"Critical error in get_employees_service: {e}", exc_info=True)
+        return {
+            "employees": [],
+            "people_analyzer_chatbot": None
+        }
 
 # --------------------------------------------------
 # Service: Submit Review

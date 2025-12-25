@@ -33,6 +33,7 @@ def get_employees(
     department: Optional[str] = None,
     role: Optional[str] = None,
     search: Optional[str] = None,
+    chatbot_id: Optional[str] = None,
     include_chatbot: bool = False,
     db: Session = Depends(get_db),
 ):
@@ -50,14 +51,17 @@ def get_employees(
     - people_analyzer_chatbot: Chatbot info (only if include_chatbot=True)
     """
     try:
-        get_current_employee_from_token(request, db)
-
+        user_info = get_current_employee_from_token(request, db)
+        user_id = user_info["id"]
+        # user_id ="8196fec7-a57c-4d71-8922-cad80cc2ea4d"
         result = get_employees_service(
             db=db,
             department=department,
             role=role,
             search=search,
+            chatbot_id=chatbot_id,
             include_chatbot=include_chatbot,
+            user_id=user_id
         )
         
         log.info(f"Returning {len(result.get('employees', []))} employees")

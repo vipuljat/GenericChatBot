@@ -71,8 +71,8 @@ async def create_chatbot_endpoint(
     documents: List[UploadFile] = File(default=[]),
     mode: Optional[str] = Form("general"),
     questions: Optional[str] = Form(None),
-    employee_ids: Optional[List[str]] = Form([]),
-    access_list: Optional[List[str]] = Form([]),
+    employee_ids: Optional[str] = Form(None),
+    access_list: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
@@ -105,7 +105,8 @@ async def create_chatbot_endpoint(
     parsed_questions = json.loads(questions) if questions else None
     generated_by_uuid = uuid.UUID(generated_by) if generated_by else None
     parsed_employee_ids = json.loads(employee_ids) if employee_ids else []
-    
+    parsed_access_list = json.loads(access_list) if access_list else []
+
     # Create chatbot (functional call)
     chatbot = create_chatbot(
         request=request,
@@ -118,8 +119,8 @@ async def create_chatbot_endpoint(
         doc_names=doc_names,
         generated_by=generated_by_uuid,
         meta_data=meta_dict,
-        employee_ids=employee_ids,
-        access_list=access_list,
+        employee_ids=parsed_employee_ids,
+        access_list=parsed_access_list,
         mode=mode,
         questions=parsed_questions,
         background_tasks=background_tasks
@@ -270,6 +271,23 @@ async def get_chatbot_endpoint(
             Question.chatbot_id == chatbot.chatbot_id
         ).first()
         questions_data = questions.question_data if questions else []
+        
+        access_list = []
+        permissions = db.query(ChatbotPermission).filter(
+            ChatbotPermission.chatbot_id == chatbot.chatbot_id
+        ).all()
+        for perm in permissions:
+            access_list.append({
+                "reviewer_id": str(perm.reviewer_id),
+                "allowed_users": perm.can_review_users or []
+            })
+        
+        employee_ids = []
+        access = db.query(ChatbotAccess).filter(
+        ChatbotAccess.chatbot_id == chatbot_id).first()
+
+        employee_ids = access.allowed_users if access else []
+
     
     return {
         "chatbot_id": str(chatbot.chatbot_id),
@@ -281,7 +299,9 @@ async def get_chatbot_endpoint(
         "document_count": len(chatbot.pdf_names) if chatbot.pdf_names else 0,
         "document_names": chatbot.pdf_names or [],
         "questions": questions_data,
-        "meta_data": chatbot.meta_data
+        "meta_data": chatbot.meta_data,
+        "access_list": access_list,
+        "employee_ids": employee_ids
     }
 
 
