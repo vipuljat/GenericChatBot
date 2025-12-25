@@ -118,8 +118,7 @@ def get_employees_service(
                 )
             )
 
-        # Apply base filters first (department, role, search)
-        base_employees = query.order_by(Employee.employee_name.asc()).all()
+        base_employees = query.order_by(Employee.created_at.asc()).all()
         log.debug(f"Base filtered employees count: {len(base_employees)}")
 
         response: Dict[str, Any] = {

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from agent.agent import render_quiz_questions
 from stateful_services.database import get_db
-from stateful_services.db_schema import Chatbot, PeopleAnalyzer, Question, Answer, Employee, ChatbotPermission
+from stateful_services.db_schema import Chatbot, ChatbotAccess, PeopleAnalyzer, Question, Answer, Employee, ChatbotPermission
 from utils.document_service import is_supported_document, get_supported_extensions
 from utils.logging import log
 
