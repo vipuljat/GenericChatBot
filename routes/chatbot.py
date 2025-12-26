@@ -35,7 +35,6 @@ class QueryRequest(BaseModel):
     history: Optional[List[dict]] = None
     user_id: Optional[str] = None
     employee_id: Optional[str] = None
-    is_quiz_answer: Optional[bool] = False  # Flag to indicate if this is a quiz answer
 
 
 class ChatbotUpdate(BaseModel):
@@ -45,7 +44,7 @@ class ChatbotUpdate(BaseModel):
     mode: Optional[str] = None
     questions: Optional[List[Dict[str, Any]]] = None
     employee_ids: Optional[List[str]]= None
-    access_list: Optional[List[str]]= None
+    access_list: Optional[List[Dict]]= None
     
 
 
@@ -56,38 +55,6 @@ class SubmitQuizRequest(BaseModel):
     user_id: Optional[str] = None
 
 
-# ============================================================================
-# INTENT DETECTION
-# ============================================================================
-
-def detect_intent(query: str) -> str:
-    """
-    Detect user intent from query.
-    Returns: 'greeting', 'quiz_start', 'general'
-    """
-    query_lower = query.strip().lower()
-    
-    # Greeting intents (high priority)
-    greetings = [
-        'hi', 'hello', 'hey', 'hola', 'greetings', 'good morning',
-        'good afternoon', 'good evening', 'howdy', 'hi there',
-        'hello there', 'hey there', 'sup', 'what\'s up', 'whats up'
-    ]
-    
-    if query_lower in greetings or any(query_lower.startswith(g + ' ') or query_lower.startswith(g + '!') for g in greetings):
-        return 'greeting'
-    
-    # Quiz start intents
-    quiz_starts = [
-        'start quiz', 'begin quiz', 'start the quiz', 'begin the quiz',
-        'start test', 'begin test', 'let\'s start', 'lets start',
-        'i\'m ready', 'im ready', 'ready to start', 'start now'
-    ]
-    
-    if any(phrase in query_lower for phrase in quiz_starts):
-        return 'quiz_start'
-    
-    return 'general'
 
 
 def generate_greeting_response(chatbot_name: str = "Assistant") -> str:
@@ -214,7 +181,7 @@ async def update_chatbot_endpoint(
     db: Session = Depends(get_db)
 ):
     """Update chatbot settings."""
-    
+
     chatbot = update_chatbot(
         db=db,
         chatbot_id=uuid.UUID(chatbot_id),
@@ -255,21 +222,38 @@ async def delete_chatbot_endpoint(
 
 @router.get("/list", summary="List chatbots")
 async def list_chatbots(
+    request: Request,
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     status: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
-    """List chatbots with pagination."""
-    
+    user_info = get_current_employee_from_token(request, db)
+
+    role = user_info.employee_role
+    user_id = str(user_info.id)
+
     query = db.query(Chatbot)
-    
+
+    # 🔐 Non-admins: restrict by ChatbotAccess.allowed_users
+    if role != "admin":
+        allowed_chatbot_ids_subquery = (
+            db.query(ChatbotAccess.chatbot_id)
+            .filter(ChatbotAccess.allowed_users.contains([user_id]))
+            .subquery()
+        )
+
+        query = query.filter(
+            Chatbot.chatbot_id.in_(allowed_chatbot_ids_subquery)
+        )
+
+    # Optional status filter
     if status:
         query = query.filter(Chatbot.status == status)
-    
+
     total = query.count()
     chatbots = query.offset(skip).limit(limit).all()
-    
+
     return {
         "total": total,
         "skip": skip,
@@ -283,11 +267,12 @@ async def list_chatbots(
                 "description": c.description,
                 "mode": c.mode,
                 "document_count": len(c.pdf_names) if c.pdf_names else 0,
-                "document_names": c.pdf_names or []
+                "document_names": c.pdf_names or [],
             }
             for c in chatbots
-        ]
+        ],
     }
+
 
 
 @router.get("/{chatbot_id}", summary="Get chatbot details")
@@ -359,15 +344,9 @@ async def query_chatbot_endpoint(
     db: Session = Depends(get_db)
 ):
     """
-    Universal query endpoint with intent detection.
+    Universal query endpoint.
     Routes to RAG, Quiz, or People Analyzer based on chatbot mode.
     ALL COSTS LOGGED AUTOMATICALLY.
-    
-    Intent Priority:
-    1. Greeting - Returns immediate friendly response
-    2. Quiz Start - Initiates quiz/review
-    3. Quiz Answer - Processes answer (when is_quiz_answer=True)
-    4. General Query - Document-based RAG
     
     Modes:
     - general: RAG-based question answering
@@ -375,114 +354,71 @@ async def query_chatbot_endpoint(
     - people_analyzer: People analysis with +/- ratings
     """
     
-    try:
-        # Validate input
-        if not request.query or not request.query.strip():
-            raise HTTPException(status_code=400, detail="Query cannot be empty")
-        
-        # Validate chatbot
-        chatbot = db.query(Chatbot).filter(
-            Chatbot.chatbot_id == chatbot_id
-        ).first()
-        
-        if not chatbot:
-            raise HTTPException(status_code=404, detail="Chatbot not found")
-        
-        chatbot_mode = str(chatbot.mode).lower() if chatbot.mode else "general"
-        
-        # INTENT DETECTION - Priority 1: Greetings
-        intent = detect_intent(request.query)
-        if intent == 'greeting' and not request.is_quiz_answer:
-            log.info(f"👋 Greeting detected for '{chatbot.chatbot_name}'")
-            return {
-                "mode": chatbot_mode,
-                "response": generate_greeting_response(chatbot.chatbot_name),
-                "intent": "greeting"
-            }
-        
-        log.info(f"🔍 Query for '{chatbot.chatbot_name}' ({chatbot_mode} mode, intent: {intent})")
-        
-        # Route based on mode
-        if chatbot_mode in ["quiz", "people_analyzer"]:
-            # If this is NOT a quiz answer (general query mid-quiz), use RAG
-            if not request.is_quiz_answer:
-                log.info("General query in quiz mode - using RAG")
-                result = generate_rag_response(
-                    query=request.query,
-                    chatbot_name=chatbot.chatbot_name,
-                    chatbot_instructions=request.instructions or chatbot.instruction or "You are a helpful assistant.",
-                    conversation_history=request.history or []
-                )
-                
-                return {
-                    "mode": "general_in_quiz",
-                    "response": result["response"],
-                    "sources": result.get("sources", []),
-                    "context_used": result.get("context_used", False),
-                    "intent": intent
-                }
-            
-            # Quiz or People Analyzer mode (use same service)
-            user_id = None
-            employee_id = None
-            
-            if request.user_id:
-                try:
-                    user_id = uuid.UUID(request.user_id)
-                except ValueError:
-                    pass
-            
-            if request.employee_id:
-                try:
-                    employee_id = uuid.UUID(request.employee_id)
-                except ValueError:
-                    pass
-            
-            result = quiz_query_service(
-                db=db,
-                chatbot_id=chatbot_id,
-                chatbot_name=chatbot.chatbot_name,
-                chatbot_mode=chatbot_mode,
-                query=request.query,
-                conversation_history=request.history or [],
-                user_id=user_id,
-                employee_id=employee_id
-            )
-            
-            return {
-                "mode": chatbot_mode,
-                "response": result["response"],
-                "quiz_state": result.get("quiz_state", {}),
-                "metadata": result.get("metadata", {}),
-                "intent": intent
-            }
-
-        else:
-            # General RAG mode (costs logged inside)
-            result = generate_rag_response(
-                query=request.query,
-                chatbot_name=chatbot.chatbot_name,
-                chatbot_instructions=request.instructions or chatbot.instruction,
-                conversation_history=request.history or []
-            )
-            
-            return {
-                "mode": "general",
-                "response": result["response"],
-                "sources": result.get("sources", []),
-                "context_used": result.get("context_used", False),
-                "num_chunks_used": result.get("num_chunks_used", 0),
-                "intent": intent
-            }
+    # Validate chatbot
+    chatbot = db.query(Chatbot).filter(
+        Chatbot.chatbot_id == chatbot_id
+    ).first()
     
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error(f"Query endpoint error: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail="An error occurred processing your request. Please try again."
+    if not chatbot:
+        raise HTTPException(status_code=404, detail="Chatbot not found")
+    
+    chatbot_mode = str(chatbot.mode).lower() if chatbot.mode else "general"
+    
+    log.info(f"🔍 Query for '{chatbot.chatbot_name}' ({chatbot_mode} mode)")
+    
+    # Route based on mode
+    if chatbot_mode in ["quiz", "people_analyzer"]:
+        # Quiz or People Analyzer mode (use same service)
+        user_id = None
+        employee_id = None
+        
+        if request.user_id:
+            try:
+                user_id = uuid.UUID(request.user_id)
+            except ValueError:
+                pass
+        
+        if request.employee_id:
+            try:
+                employee_id = uuid.UUID(request.employee_id)
+            except ValueError:
+                pass
+        
+        result = quiz_query_service(
+            db=db,
+            chatbot_id=chatbot_id,
+            chatbot_name=chatbot.chatbot_name,
+            chatbot_mode=chatbot_mode,
+            query=request.query,
+            conversation_history=request.history or [],
+            user_id=user_id,
+            employee_id=employee_id
         )
+        
+        return {
+            "mode": chatbot_mode,
+            "response": result["response"],
+            "quiz_state": result.get("quiz_state", {}),
+            "metadata": result.get("metadata", {})
+        }
+
+    else:
+        # General RAG mode (costs logged inside)
+        result = generate_rag_response(
+            query=request.query,
+            chatbot_name=chatbot.chatbot_name,
+            chatbot_instructions=request.instructions or chatbot.instruction,
+            conversation_history=request.history or []
+        )
+        
+        return {
+            "mode": "general",
+            "response": result["response"],
+            "sources": result.get("sources", []),
+            "context_used": result.get("context_used", False),
+            "num_chunks_used": result.get("num_chunks_used", 0)
+        }
+
 
 
 # ============================================================================
@@ -499,17 +435,7 @@ async def submit_quiz_endpoint(
     Handles both quiz and people_analyzer modes.
     Never returns 500 for user input errors.
     """
-    
-    # Log raw payload for debugging
-    print(f"\n{'='*80}")
-    print(f"📥 SUBMIT QUIZ REQUEST RECEIVED")
-    print(f"{'='*80}")
-    print(f"chatbot_id: {payload.chatbot_id} (type: {type(payload.chatbot_id)})")
-    print(f"user_id: {payload.user_id} (type: {type(payload.user_id)})")
-    print(f"employee_id: {payload.employee_id} (type: {type(payload.employee_id)})")
-    print(f"answers keys: {list(payload.answers.keys()) if payload.answers else 'None'}")
-    print(f"{'='*80}\n")
-    
+
     try:
         # Validate chatbot exists
         chatbot = db.query(Chatbot).filter(
@@ -590,7 +516,7 @@ async def submit_quiz_endpoint(
             
             # Validate employee exists (query by string employee_id field, not UUID)
             employee = db.query(Employee).filter(
-                Employee.employee_id == str(employee_uuid)
+                Employee.id == str(employee_uuid)
             ).first()
             
             if not employee:

@@ -459,7 +459,7 @@ def get_quiz_responses(chatbot_id: uuid.UUID, db: Session) -> Dict[str, Any]:
     for attempt in attempts:
         answers_data = attempt.answer_data or {}
         employee = db.query(Employee)\
-            .filter(Employee.employee_id == attempt.attempter_by_id)\
+            .filter(Employee.id == attempt.attempter_by_id)\
             .first()
 
         detailed_answers = []
@@ -542,7 +542,7 @@ def get_people_analyzer_responses(
 
     # Fetch ratings
     query = db.query(PeopleAnalyzer, Employee.employee_name, Employee.department)\
-        .join(Employee, PeopleAnalyzer.employee_id == Employee.employee_id)\
+        .join(Employee, PeopleAnalyzer.employee_id == Employee.id)\
         .filter(PeopleAnalyzer.chatbot_id == chatbot_id)
 
     if department:
