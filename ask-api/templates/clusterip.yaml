@@ -6,8 +6,8 @@ spec:
   type: ClusterIP
   ports:
   - name: http
-    port: 8001
+    port: 8000
     protocol: TCP
-    targetPort: 8001
+    targetPort: 8000
   selector:
     dev: {{ .Values.name }}

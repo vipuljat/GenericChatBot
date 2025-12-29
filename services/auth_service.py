@@ -22,6 +22,7 @@ class MicrosoftAuthService:
     
     def get_authorization_url(self) -> str:
         """Generate the Microsoft login URL"""
+        print("DEBUG: Generating Microsoft authorization URL------------------", self.redirect_uri)
         auth_url = self.msal_app.get_authorization_request_url(
             scopes=self.scope,
             redirect_uri=self.redirect_uri

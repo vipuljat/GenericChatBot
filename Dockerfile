@@ -1,19 +1,15 @@
-FROM python:3.10.8
+FROM python:3.11.8
 
-# Create the app directory
-RUN mkdir /app
 WORKDIR /app
 
-COPY requirements.txt /app
-RUN pip install -r requirements.txt
-COPY . /app/
+COPY requirements2.txt .
+RUN pip install --no-cache-dir -r requirements2.txt
 
+COPY . .
+
+RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 8001
 
-# Copy the entrypoint script
-COPY entrypoint.sh /app/
-RUN chmod +x /app/entrypoint.sh
-
-# Set the entrypoint
 CMD ["/app/entrypoint.sh"]
+

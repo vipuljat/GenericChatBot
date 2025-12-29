@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse, JSONResponse
 from sqlalchemy.orm import Session
+import config
 from stateful_services.database import get_db
 from services.auth_service import MicrosoftAuthService
 from stateful_services.db_schema import Employee
@@ -145,8 +146,9 @@ async def auth_callback(code: str = None, error: str = None, error_description: 
         }
 
         # Redirect to frontend callback page with token and employee data
-        frontend_callback_url = f"http://localhost:3000/auth/callback?token={jwt_token}&employee={urllib.parse.quote(json.dumps(employee_data))}"
-        print(f"DEBUG: Redirecting to frontend")
+        print(f"DEBUG: Redirecting to frontend",f"{config.FRONTEND_URL}/auth/callback?token={jwt_token}&employee={urllib.parse.quote(json.dumps(employee_data))}")
+        print(f"DEBUG: Frontend Data: {config.FRONTEND_URL}")
+        frontend_callback_url = f"{config.FRONTEND_URL}/auth/callback?token={jwt_token}&employee={urllib.parse.quote(json.dumps(employee_data))}"
         return RedirectResponse(url=frontend_callback_url)
     
     except HTTPException:
