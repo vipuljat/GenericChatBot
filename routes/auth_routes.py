@@ -146,8 +146,8 @@ async def auth_callback(code: str = None, error: str = None, error_description: 
         }
 
         # Redirect to frontend callback page with token and employee data
-        frontend_callback_url = f"/auth/callback?token={jwt_token}&employee={urllib.parse.quote(json.dumps(employee_data))}"
         print(f"DEBUG: Redirecting to frontend")
+        frontend_callback_url = f"{config.FRONTEND_URL}/auth/callback?token={jwt_token}&employee={urllib.parse.quote(json.dumps(employee_data))}"
         return RedirectResponse(url=frontend_callback_url)
     
     except HTTPException:
