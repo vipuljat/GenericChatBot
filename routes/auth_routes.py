@@ -99,7 +99,7 @@ async def auth_callback(code: str = None, error: str = None, error_description: 
         department = user_info.get("department")
 
         # Check if employee exists
-        employee = db.query(Employee).filter(Employee.employee_id == microsoft_id).first()
+        employee = db.query(Employee).filter(Employee.employee_email == employee_email).first()
 
         if not employee:
             # Create new employee
@@ -146,8 +146,6 @@ async def auth_callback(code: str = None, error: str = None, error_description: 
         }
 
         # Redirect to frontend callback page with token and employee data
-        print(f"DEBUG: Redirecting to frontend",f"{config.FRONTEND_URL}/auth/callback?token={jwt_token}&employee={urllib.parse.quote(json.dumps(employee_data))}")
-        print(f"DEBUG: Frontend Data: {config.FRONTEND_URL}")
         frontend_callback_url = f"{config.FRONTEND_URL}/auth/callback?token={jwt_token}&employee={urllib.parse.quote(json.dumps(employee_data))}"
         return RedirectResponse(url=frontend_callback_url)
     
