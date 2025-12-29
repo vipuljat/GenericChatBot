@@ -3,7 +3,7 @@
 # Declare variables to be passed into your templates.
 
 #Name
-name: sevenseer-skillbridge-service
+name: ask-api
 #Replicas
 replicaCount: 1
 
@@ -14,7 +14,7 @@ replicaCount: 1
 
 #Images
 image:
-  repository: labs47b/sevenseer-skillbridge-service
+  repository: labs47b/ask-api
   tag: a-------------------------------9
   pullPolicy: Always
 

@@ -22,125 +22,119 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
-              containerPort: 8001
+              containerPort: 8000
               protocol: TCP
           env:
-       
-            - name: POSTGRES_USER
+            - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: POSTGRES_USER
-            - name: POSTGRES_PASSWORD
+                  key: DATABASE_URL
+            - name: GEMINI_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: POSTGRES_PASSWORD
-            - name: POSTGRES_DB
+                  key: GEMINI_API_KEY
+            - name: GEMINI_MODEL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: POSTGRES_DB
-            - name: POSTGRES_HOST
+                  key: GEMINI_MODEL
+            - name: MICROSOFT_CLIENT_ID
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: POSTGRES_HOST
-            - name: POSTGRES_PORT
+                  key: MICROSOFT_CLIENT_ID
+            - name: MICROSOFT_TENANT_ID
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: POSTGRES_PORT
-            - name: CONTENT_MANAGEMENT_DOWNLOAD_MEDIA
+                  key: MICROSOFT_TENANT_ID
+            - name: MICROSOFT_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: CONTENT_MANAGEMENT_DOWNLOAD_MEDIA
-            - name: USER_MANAGEMENT_IDENTITY_LIST
+                  key: MICROSOFT_CLIENT_SECRET
+            - name: MICROSOFT_REDIRECT_URI
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: USER_MANAGEMENT_IDENTITY_LIST
-            - name: CONTENT_MANAGEMENT_COPY_OBJECTS
+                  key: MICROSOFT_REDIRECT_URI
+            - name: MICROSOFT_AUTHORITY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: CONTENT_MANAGEMENT_COPY_OBJECTS
-            - name: USER_MANAGEMENT_IDENTITY_COUNT
+                  key: MICROSOFT_AUTHORITY
+            - name: JWT_SECRET_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: USER_MANAGEMENT_IDENTITY_COUNT
-            - name: APPLY_LINK
+                  key: JWT_SECRET_KEY
+            - name: JWT_ALGORITHM
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: APPLY_LINK
+                  key: JWT_ALGORITHM
+            - name: JWT_EXPIRATION_MINUTES
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: JWT_EXPIRATION_MINUTES
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
                   key: OPENAI_API_KEY
-            - name: ADD_NOTIFICATION_URL
+            - name: OPENAI_EMBEDDING_MODEL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: ADD_NOTIFICATION_URL
-            - name: EXPORT_DOC_PDF
+                  key: OPENAI_EMBEDDING_MODEL
+            - name: QDRANT_HOST
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: EXPORT_DOC_PDF
-            - name: CONTENT_MANAGEMENT_UPLOAD_MEDIA
+                  key: QDRANT_HOST
+            - name: QDRANT_PORT
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: CONTENT_MANAGEMENT_UPLOAD_MEDIA
-            - name: EXPOSED_DOC_URL
+                  key: QDRANT_PORT
+            - name: QDRANT_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: EXPOSED_DOC_URL
-            - name: CONTENT_MANAGEMENT_CREATE_BUCKET
+                  key: QDRANT_API_KEY
+            - name: QDRANT_COLLECTION_NAME
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: CONTENT_MANAGEMENT_CREATE_BUCKET
-            - name: CONTENT_MANAGEMENT_REMOVE_S3CONTENT
+                  key: QDRANT_COLLECTION_NAME
+            - name: QDRANT_STORAGE_PATH
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: CONTENT_MANAGEMENT_REMOVE_S3CONTENT
-            - name: USER_MANAGEMENT_IDENTITY_INFO
+                  key: QDRANT_STORAGE_PATH
+            - name: CHUNK_SIZE
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: USER_MANAGEMENT_IDENTITY_INFO
-            - name: OPEN_JOB_SEARCH_TOKEN
+                  key: CHUNK_SIZE
+            - name: CHUNK_OVERLAP
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: OPEN_JOB_SEARCH_TOKEN
-            - name: DB_CONNECTIONS_LIMIT
+                  key: CHUNK_OVERLAP
+            - name: UPLOAD_DIR
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: DB_CONNECTIONS_LIMIT
-            - name: CONTENT_MANAGEMENT_LEARNING_PATH
+                  key: UPLOAD_DIR
+            - name: FRONTEND_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: CONTENT_MANAGEMENT_LEARNING_PATH
-            - name: MASTER_LP_BASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: MASTER_LP_BASE_URL
-            - name: MEDIA_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
-                  key: MEDIA_URL
+                  key: FRONTEND_URL
           {{- if .Values.Resources.enabled }}    
           resources:
             {{- toYaml .Values.Resources.resources | nindent 12 }}
