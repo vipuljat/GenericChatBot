@@ -93,48 +93,6 @@ def map_role_to_gemini(role: str) -> str:
     return 'user'
 
 
-# def generate_with_retry(
-#     prompt: str,
-#     conversation_history: List[Dict[str, str]],
-#     model_name: str,
-#     max_retries: int = 3
-# ):
-#     """Generate response with retry logic for rate limits."""
-#     backoff = 2
-#     last_error = None
-    
-#     for attempt in range(1, max_retries + 1):
-#         try:
-#             model = genai.GenerativeModel(model_name)
-            
-#             if conversation_history:
-#                 history = [
-#                     {
-#                         "role": map_role_to_gemini(msg["role"]),
-#                         "parts": [msg["content"]]
-#                     }
-#                     for msg in conversation_history
-#                 ]
-#                 chat = model.start_chat(history=history)
-#                 return chat.send_message(prompt)
-            
-#             return model.generate_content(prompt)
-        
-#         except Exception as e:
-#             last_error = e
-#             msg = str(e)
-            
-#             if ("429" in msg or "quota" in msg.lower() or "rate" in msg.lower()) and attempt < max_retries:
-#                 log.warning(f"⚠️  Rate limit (attempt {attempt}), retrying in {backoff}s")
-#                 time.sleep(backoff)
-#                 backoff *= 2
-#                 continue
-            
-#             break
-    
-#     raise last_error or RuntimeError("Generation failed after retries")
-
-
 def generate_with_retry(
     prompt: str,
     conversation_history: List[Dict[str, str]],
@@ -155,7 +113,7 @@ def generate_with_retry(
     """
     backoff = 2
     last_error = None
-    
+    print("prompt", prompt)
     for attempt in range(1, max_retries + 1):
         try:
             model = genai.GenerativeModel(model_name)
@@ -200,7 +158,7 @@ def generate_rag_response(
     chatbot_instructions: Optional[str] = None,
     conversation_history: Optional[List[Dict[str, str]]] = None,
     top_k: int = 10,
-    min_score: float = 0.55,
+    min_score: float = 0.5,
     max_retries: int = 3,
     model_name: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -241,11 +199,97 @@ Relevant Context:
 
 User Question: {query}
 
-Instructions:
-- Answer naturally without mentioning "the documents" or "the context"
-- Use the context to provide accurate information
-- If context doesn't fully answer, say so clearly
-- Be concise and helpful
+CRITICAL INSTRUCTIONS - Read Carefully:
+
+1. QUERY TYPE DETECTION:
+   - GREETING (hi, hello, hey, how are you, what's up): Respond warmly, mention you can help with company info
+   - SMALL TALK (thank you, ok, I see, got it): Acknowledge briefly and ask if they need more help
+   - KNOWLEDGE QUESTION: Use context strictly as described below
+   - CLARIFICATION REQUEST (what do you mean, can you explain): Refer to previous context or ask what specifically they want clarified
+   - OUT OF SCOPE (weather, sports, personal advice): Politely redirect to company-related topics
+
+2. FOR KNOWLEDGE QUESTIONS ONLY:
+   a) If context DIRECTLY answers the question:
+      - Provide clear, accurate answer
+      - Use natural language (don't say "according to the documents")
+      - Be specific with numbers, dates, policies if present
+   
+   b) If context is PARTIALLY relevant but incomplete:
+      - Answer what you CAN from context
+      - Clearly state what information is missing
+      - Example: "Based on company policy, X is required. However, I don't have information about Y in the documents. Please contact HR for complete details."
+   
+   c) If context is NOT relevant to the question:
+      - Say: "I don't have information about that in the company documents."
+      - Suggest 2-3 related topics you CAN help with from the context
+      - Example: "I don't have information about remote work policies. I can help with: leave policies, working hours, or expense reimbursement."
+
+3. HANDLING SPECIFIC EDGE CASES:
+
+   a) COMPARISON QUESTIONS ("What's the difference between X and Y?"):
+      - Only compare if BOTH are in context
+      - If only one is present, explain that one and note the other isn't covered
+
+   b) YES/NO QUESTIONS ("Can I do X?", "Is Y allowed?"):
+      - Give definitive answer if context is clear
+      - If ambiguous: "Based on the policy, it appears [likely/not], but I recommend confirming with HR"
+      - If not covered: "I don't have specific information about this. Please check with HR."
+
+   c) HYPOTHETICAL/SCENARIO QUESTIONS ("What if I...", "What happens when..."):
+      - Answer ONLY if scenario is explicitly covered in context
+      - Otherwise: "This specific scenario isn't covered in the documents. Please consult HR for guidance."
+
+   d) RECENT CHANGES ("What's the new policy?", "Has this changed?"):
+      - Provide the information from context
+      - Add: "This is based on available documentation. For the most recent updates, please verify with HR."
+
+   e) NUMERICAL/DATE QUESTIONS ("How many days?", "What's the deadline?"):
+      - Provide EXACT numbers/dates from context
+      - If approximate or unclear, say so explicitly
+      - Never guess or estimate numbers
+
+   f) MULTI-PART QUESTIONS ("Can I do X and also how about Y?"):
+      - Address each part separately
+      - If some parts aren't covered, be explicit about which ones
+
+   g) FOLLOW-UP QUESTIONS (referencing previous conversation):
+      - Use conversation history if available
+      - If unclear what they're referring to: "Could you please clarify what you'd like to know more about?"
+
+   h) CONTRADICTORY INFORMATION in context:
+      - Acknowledge there are different pieces of information
+      - Present both and suggest confirming with HR
+
+   i) PERSONAL SITUATIONS ("I am in X situation, what should I do?"):
+      - Provide general policy information from context
+      - Always add: "For your specific situation, please consult with HR for personalized guidance."
+
+   j) SENSITIVE TOPICS (harassment, discrimination, legal issues):
+      - Provide factual policy information if in context
+      - ALWAYS add: "For serious matters like this, please contact HR immediately or use the official reporting channels."
+
+4. TONE AND LANGUAGE RULES:
+   - Be professional but friendly
+   - Never say "the documents say" or "according to the context"
+   - Use confidence when information is clear, express uncertainty when it's not
+   - Don't over-apologize (one "I don't have that information" is enough)
+   - Keep responses concise but complete
+
+5. STRICT PROHIBITIONS:
+   - NEVER make up information not in context
+   - NEVER give medical, legal, or financial advice beyond what's in policy docs
+   - NEVER share personal information about other employees
+   - NEVER make promises on behalf of the company
+   - NEVER interpret ambiguous policies - direct to HR instead
+
+6. QUALITY CHECKS:
+   - If you're about to cite a number/date/policy, verify it's actually in the context
+   - If you're unsure, express uncertainty rather than guessing
+   - If the answer would require combining information in a complex way not directly stated, acknowledge limitations
+
+7. ALWAYS FOLLOW UP:
+   - Always ask clarifying questions if unclear
+   - Always ask for confirmation if ambiguous
 
 Response:"""
         else:
