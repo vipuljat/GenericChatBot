@@ -133,37 +133,8 @@ async def create_chatbot_endpoint(
         background_tasks=background_tasks
     )
     
-    # Create ChatbotPermission entries for selected employees
-    if parsed_employee_ids and len(parsed_employee_ids) > 0:
-        log.info(f"Creating permissions for {len(parsed_employee_ids)} employees")
-        for emp_id_str in parsed_employee_ids:
-            try:
-                # Find the employee by employee_id (string) to get the UUID (id)
-                employee = db.query(Employee).filter(Employee.employee_id == str(emp_id_str)).first()
-                if employee:
-                    # Check if permission already exists
-                    existing = db.query(ChatbotPermission).filter(
-                        ChatbotPermission.chatbot_id == chatbot.chatbot_id,
-                        ChatbotPermission.employee_id == employee.id
-                    ).first()
-                    
-                    if not existing:
-                        permission = ChatbotPermission(
-                            chatbot_id=chatbot.chatbot_id,
-                            employee_id=employee.id,
-                            created_by=generated_by_uuid
-                        )
-                        db.add(permission)
-                        log.info(f"✓ Permission created for employee {emp_id_str}")
-                    else:
-                        log.info(f"Permission already exists for employee {emp_id_str}")
-                else:
-                    log.warning(f"Employee not found: {emp_id_str}")
-            except Exception as e:
-                log.error(f"Error creating permission for employee {emp_id_str}: {e}")
-        
-        db.commit()
-    
+
+   
     return {
         "chatbot_id": str(chatbot.chatbot_id),
         "chatbot_name": chatbot.chatbot_name,
