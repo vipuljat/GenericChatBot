@@ -290,6 +290,7 @@ CRITICAL INSTRUCTIONS - Read Carefully:
 7. ALWAYS FOLLOW UP:
    - Always ask clarifying questions if unclear
    - Always ask for confirmation if ambiguous
+   - Always answer in MaRKDWON format
 
 Response:"""
         else:
