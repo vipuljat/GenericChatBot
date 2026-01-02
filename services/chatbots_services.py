@@ -15,6 +15,7 @@ from fastapi.params import Depends
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, BackgroundTasks, Request
 from qdrant_client.models import PointStruct
+from sqlalchemy.orm import aliased
 
 from stateful_services.database import get_db
 from stateful_services.db_schema import Answer, Chatbot, ChatbotAccess, ChatbotPermission, Employee, PeopleAnalyzer, Question
@@ -540,13 +541,22 @@ def get_people_analyzer_responses(
 
     questions.sort(key=lambda x: x.get("order", 999))
 
-    # Fetch ratings
-    query = db.query(PeopleAnalyzer, Employee.employee_name, Employee.department)\
-        .join(Employee, PeopleAnalyzer.employee_id == Employee.id)\
+    # Fetch ratings with both rated employee and rater information
+    RatedEmployee = aliased(Employee)
+    RaterEmployee = aliased(Employee)
+    
+    query = db.query(
+        PeopleAnalyzer,
+        RatedEmployee.employee_name.label('rated_employee_name'),
+        RatedEmployee.department.label('rated_employee_department'),
+        RaterEmployee.employee_name.label('rater_name')
+    )\
+        .join(RatedEmployee, PeopleAnalyzer.employee_id == RatedEmployee.id)\
+        .outerjoin(RaterEmployee, PeopleAnalyzer.created_by == RaterEmployee.id)\
         .filter(PeopleAnalyzer.chatbot_id == chatbot_id)
 
     if department:
-        query = query.filter(Employee.department.ilike(f"%{department}%"))
+        query = query.filter(RatedEmployee.department.ilike(f"%{department}%"))
 
     entries = query.all()
 
@@ -562,19 +572,29 @@ def get_people_analyzer_responses(
     # Group by rated employee
     grouped: Dict[str, Dict] = {}
 
-    for entry, employee_name, emp_department in entries:
+    for entry, rated_employee_name, rated_employee_department, rater_name in entries:
         emp_id = entry.employee_id
         if emp_id not in grouped:
             grouped[emp_id] = {
                 "employee_id": emp_id,
-                "employee_name": employee_name or "Unknown",
-                "department": emp_department or "Unknown",
+                "employee_name": rated_employee_name or "Unknown",
+                "department": rated_employee_department or "Unknown",
                 "total_ratings": 0,
                 "question_stats": {},
                 "total_sum": 0,
-                "total_count": 0
+                "total_count": 0,
+                "responses": []
             }
 
+        # Store individual response details with rater name
+        response_detail = {
+            "rater_id": entry.created_by,
+            "rater_name": rater_name or "Anonymous",
+            "answers": entry.answers or {},
+            "created_at": entry.created_at.isoformat() if entry.created_at else None
+        }
+        grouped[emp_id]["responses"].append(response_detail)
+        
         grouped[emp_id]["total_ratings"] += 1
 
         answers = entry.answers or {}
@@ -616,8 +636,9 @@ def get_people_analyzer_responses(
             "employee_name": data["employee_name"],
             "department": data["department"],
             "total_ratings": data["total_ratings"],
-            "overall_average": overall_average,  # New field
-            "question_averages": question_averages
+            "overall_average": overall_average,
+            "question_averages": question_averages,
+            "responses": data["responses"]
         })
 
     # Sort by overall_average descending (highest rated first)
