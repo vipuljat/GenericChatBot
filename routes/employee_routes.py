@@ -4,6 +4,7 @@ Handles employee operations including role management
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Body, Form
+from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from stateful_services.database import get_db
 from stateful_services.db_schema import Employee
@@ -244,22 +245,27 @@ def get_current_employee(
 
 
 # ===================== PATCH UPDATE ROUTE =====================
+class UpdateEmployeeRequest(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    role: Optional[str] = None
+    department: Optional[str] = None
+    status: Optional[str] = None
+    meta_data: Optional[Dict[str, Any]] = None
 
 # ...existing code...
-@router.patch("/employees/update/{employee_id}", summary="Update employee profile")
+@router.patch(
+    "/update/{employee_id}",
+    summary="Update employee profile",
+)
 async def update_employee_profile(
     employee_id: str,
-    name: Optional[str] = Form(None),
-    email: Optional[str] = Form(None),
-    role: Optional[str] = Form(None),
-    department: Optional[str] = Form(None),
-    status: Optional[str] = Form(None),
-    meta_data: Optional[str] = Form(None),
-    db: Session = Depends(get_db)
+    payload: UpdateEmployeeRequest = Body(...),
+    db: Session = Depends(get_db),
 ):
     """
     Update employee profile details.
-    Supports partial updates.
+    Supports partial updates via JSON body.
     """
 
     log.info(f"Received update request for employee_id={employee_id}")
@@ -269,34 +275,30 @@ async def update_employee_profile(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid employee_id UUID")
 
-    meta_data_dict = None
-    if meta_data:
-        try:
-            meta_data_dict = json.loads(meta_data)
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="Invalid JSON format in meta_data")
-
     employee = update_employee_service(
         db=db,
         employee_id=employee_uuid,
-        name=name,
-        email=email,
-        role=role,
-        department=department,
-        status=status,
-        meta_data=meta_data_dict,
+        name=payload.name,
+        email=payload.email,
+        role=payload.role,
+        department=payload.department,
+        status=payload.status,
+        meta_data=payload.meta_data,
     )
 
-    # FIX: map response fields to actual model attributes
     return {
         "employee_id": str(employee.id),
         "name": employee.employee_name,
         "email": employee.employee_email,
         "role": employee.employee_role,
-        "status": employee.meta_data.get("status") if isinstance(employee.meta_data, dict) else None,
+        "status": (
+            employee.meta_data.get("status")
+            if isinstance(employee.meta_data, dict)
+            else None
+        ),
         "message": "Employee profile updated successfully",
     }
-# ...existing code...
+
 
 # ===================== SERVICE FUNCTION =====================
 
