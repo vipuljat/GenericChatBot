@@ -24,15 +24,28 @@ genai.configure(api_key=config.GEMINI_API_KEY)
 # INTENT DETECTION
 # ============================================================================
 
-def detect_user_intent(user_message: str) -> str:
+def detect_user_intent(user_message: str, chatbot_mode: str = "quiz") -> str:
     """
     Detect user intent using Gemini for accurate classification.
+    
+    Args:
+        user_message: The user's message
+        chatbot_mode: "quiz" or "people_analyzer"
     
     Returns:
         "greeting" | "skip" | "end_quiz" | "clarification_question" | "answer" | "navigate_previous" | "navigate_next"
     """
     try:
         msg_lower = user_message.lower().strip()
+        
+        # Special handling for people_analyzer mode - accept both symbols and typed words
+        if chatbot_mode == "people_analyzer":
+            # Accept symbols: +, -, ±, +-
+            if user_message.strip() in ["+", "-", "±", "+-"]:
+                return "answer"
+            # Accept typed words: positive, negative, average
+            if msg_lower in ["positive", "negative", "average"]:
+                return "answer"
         
         # Fast rule-based detection for obvious cases
         greetings = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening']
@@ -138,25 +151,33 @@ def get_quiz_session_from_history(conversation_history: List[Dict[str, str]]) ->
         if msg.get("role") in ["model", "assistant", "bot"]:
             content = msg.get("content", "")
             
-            # Check for question markers
+            # Check for question markers to track current position
             match = re.search(r'Question (\d+) of (\d+)', content)
             if match:
                 question_num = int(match.group(1))
                 current_index = question_num - 1
             
             # Check for skip confirmation
-            if "skipping that question" in content.lower():
+            if "skipping that question" in content.lower() or "okay, skipping" in content.lower():
                 if current_index > 0:
                     skipped_idx = current_index - 1
                     if skipped_idx not in skipped:
                         skipped.append(skipped_idx)
+                        answers[str(skipped_idx)] = "skipped"
             
-            # Check for answer recorded
-            if "answer recorded" in content.lower():
+            # Check for answer recorded - MULTIPLE PATTERNS
+            answer_recorded = (
+                "answer recorded" in content.lower() or
+                "got it!" in content.lower() or
+                "thank you for your feedback" in content.lower()
+            )
+            
+            if answer_recorded:
                 if current_index > 0:
                     answered_idx = current_index - 1
                     if answered_idx not in attempted:
                         attempted.append(answered_idx)
+                        # Get the actual answer from previous user message
                         if i > 0:
                             prev_msg = conversation_history[i-1]
                             if prev_msg.get("role") == "user":
@@ -169,7 +190,7 @@ def get_quiz_session_from_history(conversation_history: List[Dict[str, str]]) ->
     state["skipped"] = skipped
     state["answers"] = answers
     
-    log.info(f"Quiz state: index={current_index}, attempted={len(attempted)}, skipped={len(skipped)}")
+    log.info(f"Quiz state: index={current_index}, attempted={len(attempted)}, skipped={len(skipped)}, answers={list(answers.keys())}")
     return state
 
 
@@ -233,7 +254,7 @@ def handle_navigation(
                     answer_status = f"\n📝 Your previous answer: {prev_answer.get('answer', 'N/A')}"
             
             progress = build_quiz_progress_summary(quiz_state, len(questions))
-            response = f" Going back to the previous question.\n\n{progress}\n{formatted_q}{answer_status}"
+            response = f"⬅️ Going back to the previous question.\n\n{progress}\n{formatted_q}{answer_status}"
     
     else:  # direction == "next"
         if current_index >= len(questions) - 1:
@@ -246,7 +267,7 @@ def handle_navigation(
             formatted_q = format_question_for_display(question, target_index, len(questions))
             
             progress = build_quiz_progress_summary(quiz_state, len(questions))
-            response = f" Moving to the next question.\n\n{progress}\n{formatted_q}"
+            response = f"➡️ Moving to the next question.\n\n{progress}\n{formatted_q}"
     
     return {
         "response": response,
@@ -365,9 +386,17 @@ def handle_quiz_completion(
             if str(idx) not in quiz_state["answers"]:
                 quiz_state["answers"][str(idx)] = {"answer": "skipped"}
         
+        # Convert index-based answers to question ID-based answers
+        id_based_answers = {}
+        for idx_str, ans_data in quiz_state["answers"].items():
+            idx = int(idx_str)
+            if idx < len(questions):
+                question_id = str(questions[idx]["id"])  # Convert to string for consistency
+                id_based_answers[question_id] = ans_data
+        
         # Prepare answer data
         answer_data = {
-            "answers": quiz_state["answers"],
+            "answers": id_based_answers,  # Use ID-based answers instead of index-based
             "attempted": quiz_state["attempted"],
             "skipped": quiz_state["skipped"],
             "total_questions": len(questions),
@@ -381,7 +410,7 @@ def handle_quiz_completion(
                 id=uuid.uuid4(),
                 chatbot_id=uuid.UUID(chatbot_id),
                 employee_id=employee_id,  # Person being analyzed
-                answers=answer_data.get("answers", []),
+                answers=id_based_answers,  # Save the ID-based answers directly
                 created_by=user_id  # Person who filled it
             )
             db.add(new_record)
@@ -485,8 +514,8 @@ def quiz_query_service(
         # Extract quiz state from history
         quiz_state = get_quiz_session_from_history(conversation_history)
         
-        # Detect user intent
-        intent = detect_user_intent(query)
+        # Detect user intent (pass chatbot_mode for people_analyzer special handling)
+        intent = detect_user_intent(query, chatbot_mode=chatbot_mode)
         log.info(f"Intent: {intent}")
         
         # Check if starting
@@ -536,7 +565,7 @@ def quiz_query_service(
                 }
             }
         
-        # Handle navigation - NEW!
+        # Handle navigation
         if intent == "navigate_previous":
             return handle_navigation("previous", questions, quiz_state)
         
@@ -572,7 +601,8 @@ def quiz_query_service(
             
             # Record skipped answer
             quiz_state["answers"][str(current_q_index)] = "skipped"
-            quiz_state["skipped"].append(current_q_index)
+            if current_q_index not in quiz_state["skipped"]:
+                quiz_state["skipped"].append(current_q_index)
             
             # Move to next question
             quiz_state["current_index"] += 1
@@ -585,7 +615,8 @@ def quiz_query_service(
                     user_id=user_id,
                     employee_id=employee_id,
                     quiz_state=quiz_state,
-                    questions=questions
+                    questions=questions,
+                    conversation_history=conversation_history
                 )
             
             next_question = questions[quiz_state["current_index"]]
@@ -624,12 +655,86 @@ def quiz_query_service(
                     }
                 }
             
-            # Store answer
+            # Special handling for people_analyzer mode
+            if chatbot_mode == "people_analyzer":
+                # Convert typed words to symbols
+                word_to_symbol = {
+                    "positive": "+",
+                    "negative": "-",
+                    "average": "+-"
+                }
+                
+                query_lower = query.strip().lower()
+                if query_lower in word_to_symbol:
+                    query = word_to_symbol[query_lower]
+                
+                # Validate answer is one of the valid symbols
+                valid_answers = ["+", "-", "±", "+-"]
+                if query.strip() not in valid_answers:
+                    # Not a valid people analyzer answer - treat as clarification request
+                    current_question = questions[current_q_index]
+                    formatted_q = format_question_for_display(
+                        current_question,
+                        current_q_index,
+                        len(questions)
+                    )
+                    
+                    prompt = f"""You are a professional HR assistant helping employees understand evaluation questions during a People Analyzer assessment.
+
+Current Question: {current_question.get('question', '')}
+
+Employee Query: {query}
+
+IMPORTANT GUIDELINES:
+- Provide a clear, supportive response that helps clarify the question
+- Be professional, neutral, and unbiased
+- Help the employee understand what is being asked
+- DO NOT suggest a rating (+, -, ±)
+- DO NOT choose or recommend an answer
+- DO NOT influence how they should evaluate
+- Keep response brief and focused (2-4 sentences)
+
+Respond in a helpful, clarifying manner:"""
+                    
+                    # Generate a conversational response using Gemini
+                    try:
+                        model = genai.GenerativeModel(config.GEMINI_MODEL)
+                        response_obj = model.generate_content(prompt)
+                        gemini_response = response_obj.text.strip()
+                    except Exception as e:
+                        log.error(f"Error generating Gemini response: {e}")
+                        gemini_response = "I understand you have a question. Please feel free to provide your feedback using +, -, or ± based on your assessment."
+                    
+                    response = f"{gemini_response}\n\n---\n\n{formatted_q}\n\nPlease provide your feedback: + (Positive), - (Scope for improvement), or ± (Neutral)"
+                    
+                    # CRITICAL: Don't modify quiz_state - preserve all previous answers
+                    return {
+                        "response": response,
+                        "quiz_state": quiz_state,
+                        "metadata": {
+                            "total_questions": len(questions),
+                            "current_question_index": quiz_state["current_index"],
+                            "query_handled": True,
+                            "is_clarification": True
+                        }
+                    }
+            
+            # ========================================================================
+            # STORE ANSWER - This is where answers are saved
+            # ========================================================================
+            # Store the answer in quiz_state
             quiz_state["answers"][str(current_q_index)] = {
                 "answer": query
             }
-            quiz_state["attempted"].append(current_q_index)
+            
+            # Add to attempted list if not already there
+            if current_q_index not in quiz_state["attempted"]:
+                quiz_state["attempted"].append(current_q_index)
+            
+            # Move to next question
             quiz_state["current_index"] += 1
+            
+            log.info(f"✅ Answer stored: Q{current_q_index}='{query}', attempted={quiz_state['attempted']}, all_answers={list(quiz_state['answers'].keys())}")
             
             # Check completion
             if quiz_state["current_index"] >= len(questions):
@@ -640,7 +745,8 @@ def quiz_query_service(
                     user_id=user_id,
                     employee_id=employee_id,
                     quiz_state=quiz_state,
-                    questions=questions
+                    questions=questions,
+                    conversation_history=conversation_history
                 )
             
             # Next question
@@ -652,7 +758,12 @@ def quiz_query_service(
             )
             
             progress = build_quiz_progress_summary(quiz_state, len(questions))
-            response = f"Got it! Your answer recorded. ✅\n\n{progress}\n{formatted_q}"
+            
+            # Different acknowledgment based on mode
+            if chatbot_mode == "people_analyzer":
+                response = f"Thank you for your feedback. ✅\n\n{progress}\n{formatted_q}"
+            else:
+                response = f"Got it! Your answer recorded. ✅\n\n{progress}\n{formatted_q}"
             
             return {
                 "response": response,

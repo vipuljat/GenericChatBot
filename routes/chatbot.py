@@ -15,6 +15,7 @@ from utils.logging import log
 from services.chatbots_services import (
     create_chatbot,
     get_chatbot_responses_service,
+    get_employee_evaluation_service,
     update_chatbot,
     delete_chatbot_by_id
 )
@@ -501,3 +502,17 @@ def get_chatbot_responses(
     # print(user_info,"----------------------------------")
     
     return get_chatbot_responses_service(chatbot_id, department, db)
+
+
+@router.get("/evaluation/{chatbot_id}/{employee_id}")
+def get_employee_evaluation(
+    request: Request,
+    chatbot_id: uuid.UUID,
+    employee_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    """Get individual employee evaluation data for people analyzer."""
+    # Optional: Verify user has permission to view this data
+    # user_info = get_current_employee_from_token(request, db)
+    
+    return get_employee_evaluation_service(chatbot_id, employee_id, db)

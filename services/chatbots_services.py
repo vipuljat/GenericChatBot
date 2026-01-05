@@ -651,3 +651,127 @@ def get_people_analyzer_responses(
         "filters_applied": {"department": department},
         "aggregated_data": aggregated_data
     }
+
+
+def get_employee_evaluation_service(
+    chatbot_id: uuid.UUID,
+    employee_id: uuid.UUID,
+    db: Session
+) -> Dict[str, Any]:
+    """Get individual employee evaluation data for people_analyzer."""
+    
+    chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
+    if not chatbot:
+        raise HTTPException(status_code=404, detail="Chatbot not found")
+    
+    if chatbot.mode != "people_analyzer":
+        raise HTTPException(status_code=400, detail="This endpoint is only for people_analyzer mode")
+    
+    # Fetch questions
+    questions_raw = db.query(Question)\
+        .filter(Question.chatbot_id == chatbot_id, Question.status == "active")\
+        .all()
+
+    questions = []
+    for q in questions_raw:
+        data_list = q.question_data
+        if isinstance(data_list, list):
+            for item in data_list:
+                questions.append({
+                    "id": item.get("id"),
+                    "text": item.get("text"),
+                    "category": item.get("category"),
+                    "order": item.get("order", 999)
+                })
+        else:
+            questions.append({
+                "id": data_list.get("id"),
+                "text": data_list.get("text"),
+                "category": data_list.get("category"),
+                "order": data_list.get("order", 999)
+            })
+
+    questions.sort(key=lambda x: x.get("order", 999))
+
+    # Fetch employee info and ratings
+    RatedEmployee = aliased(Employee)
+    RaterEmployee = aliased(Employee)
+    
+    query = db.query(
+        PeopleAnalyzer,
+        RatedEmployee.employee_name.label('rated_employee_name'),
+        RatedEmployee.department.label('rated_employee_department'),
+        RaterEmployee.employee_name.label('rater_name')
+    )\
+        .join(RatedEmployee, PeopleAnalyzer.employee_id == RatedEmployee.id)\
+        .outerjoin(RaterEmployee, PeopleAnalyzer.created_by == RaterEmployee.id)\
+        .filter(
+            PeopleAnalyzer.chatbot_id == chatbot_id,
+            PeopleAnalyzer.employee_id == employee_id
+        )
+
+    entries = query.all()
+
+    if not entries:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No evaluation data found for employee {employee_id}"
+        )
+
+    # Calculate statistics
+    employee_name = entries[0][1]
+    employee_department = entries[0][2]
+    total_ratings = len(entries)
+    
+    question_stats = {}
+    total_sum = 0
+    total_count = 0
+    responses = []
+
+    for entry, rated_employee_name, rated_employee_department, rater_name in entries:
+        # Store individual response details with rater name
+        response_detail = {
+            "rater_id": entry.created_by,
+            "rater_name": rater_name or "Anonymous",
+            "answers": entry.answers or {},
+            "created_at": entry.created_at.isoformat() if entry.created_at else None
+        }
+        responses.append(response_detail)
+
+        answers = entry.answers or {}
+        for q_id_str, ans_obj in answers.items():
+            answer = ans_obj.get("answer") if isinstance(ans_obj, dict) else ans_obj
+            if answer == "skipped" or answer is None:
+                continue
+
+            if q_id_str not in question_stats:
+                question_stats[q_id_str] = {"sum": 0, "count": 0}
+
+            score = {"+": 4, "-": 0, "+-": 2}.get(str(answer).strip(), 0)
+            question_stats[q_id_str]["sum"] += score
+            question_stats[q_id_str]["count"] += 1
+
+            total_sum += score
+            total_count += 1
+
+    # Calculate averages
+    question_averages = {}
+    for q_id, stats in question_stats.items():
+        avg = stats["sum"] / stats["count"] if stats["count"] > 0 else 0
+        question_averages[q_id] = {
+            "average": round(avg, 2),
+            "count": stats["count"]
+        }
+
+    overall_average = round(total_sum / total_count, 2) if total_count > 0 else 0
+
+    return {
+        "employee_id": str(employee_id),
+        "employee_name": employee_name,
+        "department": employee_department,
+        "total_ratings": total_ratings,
+        "overall_average": overall_average,
+        "question_averages": question_averages,
+        "responses": responses,
+        "questions": questions
+    }
