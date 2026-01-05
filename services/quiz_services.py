@@ -1,5 +1,5 @@
 """
-Quiz Mode Service - Functional approach with updated imports.
+Quiz Mode Service - Functional approach with navigation support.
 Handles interactive quiz assessments with intelligent conversation flow.
 """
 
@@ -29,7 +29,7 @@ def detect_user_intent(user_message: str) -> str:
     Detect user intent using Gemini for accurate classification.
     
     Returns:
-        "greeting" | "skip" | "end_quiz" | "clarification_question" | "answer"
+        "greeting" | "skip" | "end_quiz" | "clarification_question" | "answer" | "navigate_previous" | "navigate_next"
     """
     try:
         msg_lower = user_message.lower().strip()
@@ -39,13 +39,22 @@ def detect_user_intent(user_message: str) -> str:
         if any(msg_lower == greet or msg_lower.startswith(greet + ' ') for greet in greetings) and len(msg_lower) < 30:
             return "greeting"
         
+        # Navigation detection - MUST come before other checks
+        previous_phrases = ['previous question', 'prev question', 'go back', 'last question', 'back']
+        if any(phrase in msg_lower for phrase in previous_phrases):
+            return "navigate_previous"
+        
+        next_phrases = ['next question', 'move to next']
+        if any(phrase in msg_lower for phrase in next_phrases):
+            return "navigate_next"
+        
         # End quiz detection
         end_phrases = ['end quiz', 'finish quiz', 'stop quiz', 'submit quiz', 'i am done', "i'm done", 'submit']
         if any(phrase in msg_lower for phrase in end_phrases):
             return "end_quiz"
         
         # Skip detection
-        skip_phrases = ['skip', 'skip this', 'skip it', 'next question', 'pass', 'next']
+        skip_phrases = ['skip', 'skip this', 'skip it', 'pass', 'next']
         if any(msg_lower == phrase or msg_lower.startswith(phrase + ' ') for phrase in skip_phrases):
             return "skip"
         
@@ -59,8 +68,10 @@ Classify as ONE of these intents:
 2. "skip" - User wants to skip (e.g., "skip", "don't know", "I don't know")
 3. "answer" - User providing an answer (e.g., "A", "option B", "I think it's C", any actual answer)
 4. "end_quiz" - User wants to end the quiz (e.g., "I'm done", "submit")
+5. "navigate_previous" - User wants to go to previous question (e.g., "previous question", "go back")
+6. "navigate_next" - User wants to move to next question (e.g., "next question")
 
-Respond with ONLY ONE WORD: clarification_question, skip, answer, or end_quiz.
+Respond with ONLY ONE WORD: clarification_question, skip, answer, end_quiz, navigate_previous, or navigate_next.
 
 NOTE: if user use +, _ or +-, it will be considered as answer.
 
@@ -68,6 +79,9 @@ Examples:
 "explain" -> clarification_question
 "i don't get the question" -> clarification_question
 "can you clarify?" -> clarification_question
+"previous question" -> navigate_previous
+"go back" -> navigate_previous
+"next question" -> navigate_next
 "don't know" -> skip
 "I don't know" -> skip
 "A" -> answer
@@ -81,7 +95,7 @@ Examples:
         detected_intent = response.text.strip().lower()
         
         # Validate response
-        valid_intents = ['clarification_question', 'skip', 'answer', 'end_quiz']
+        valid_intents = ['clarification_question', 'skip', 'answer', 'end_quiz', 'navigate_previous', 'navigate_next']
         if detected_intent in valid_intents:
             log.info(f"Gemini detected intent: {detected_intent} for '{user_message[:50]}'")
             return detected_intent
@@ -92,7 +106,6 @@ Examples:
     except Exception as e:
         log.error(f"Intent detection failed: {e}, defaulting to 'answer'")
         return "answer"
-
 
 
 def get_quiz_session_from_history(conversation_history: List[Dict[str, str]]) -> Dict[str, Any]:
@@ -167,7 +180,7 @@ def build_quiz_progress_summary(state: Dict[str, Any], total_questions: int) -> 
     current_index = state.get("current_index", 0)
     remaining = total_questions - current_index
     
-    return (f" Progress: {answered} answered, {skipped_count} skipped, "
+    return (f"📊 Progress: {answered} answered, {skipped_count} skipped, "
             f"{remaining} remaining out of {total_questions} total questions.")
 
 
@@ -178,7 +191,7 @@ def format_question_for_display(question: Dict[str, Any], index: int, total: int
     
     log.info(f"Formatting question {index}: type={q_type}, text_length={len(q_text)}")
     
-    formatted = f"\n Question {index + 1} of {total}**\n\n{q_text}\n"
+    formatted = f"\n**Question {index + 1} of {total}**\n\n{q_text}\n"
     
     # If multiple choice, show options
     if q_type in ['mcq', 'multiple_choice'] and 'options' in question:
@@ -186,8 +199,64 @@ def format_question_for_display(question: Dict[str, Any], index: int, total: int
         for i, option in enumerate(question['options']):
             formatted += f"{chr(65 + i)}. {option}\n"
     
-    formatted += "\n You can answer, skip, or ask for clarification about this question."
+    formatted += "\n💡 You can answer, skip, or ask for clarification about this question."
     return formatted
+
+
+def handle_navigation(
+    direction: str,  # "previous" or "next"
+    questions: List[Dict[str, Any]],
+    quiz_state: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Handle navigation to previous or next question.
+    """
+    current_index = quiz_state["current_index"]
+    
+    if direction == "previous":
+        if current_index == 0:
+            response = "You're already at the first question!"
+            target_index = 0
+        else:
+            target_index = current_index - 1
+            quiz_state["current_index"] = target_index
+            question = questions[target_index]
+            formatted_q = format_question_for_display(question, target_index, len(questions))
+            
+            # Check if this question was already answered
+            answer_status = ""
+            if str(target_index) in quiz_state["answers"]:
+                prev_answer = quiz_state["answers"][str(target_index)]
+                if prev_answer == "skipped":
+                    answer_status = "\n⚠️ You skipped this question earlier."
+                else:
+                    answer_status = f"\n📝 Your previous answer: {prev_answer.get('answer', 'N/A')}"
+            
+            progress = build_quiz_progress_summary(quiz_state, len(questions))
+            response = f" Going back to the previous question.\n\n{progress}\n{formatted_q}{answer_status}"
+    
+    else:  # direction == "next"
+        if current_index >= len(questions) - 1:
+            response = "You're at the last question! Submit your quiz or answer this question."
+            target_index = current_index
+        else:
+            target_index = current_index + 1
+            quiz_state["current_index"] = target_index
+            question = questions[target_index]
+            formatted_q = format_question_for_display(question, target_index, len(questions))
+            
+            progress = build_quiz_progress_summary(quiz_state, len(questions))
+            response = f" Moving to the next question.\n\n{progress}\n{formatted_q}"
+    
+    return {
+        "response": response,
+        "quiz_state": quiz_state,
+        "metadata": {
+            "total_questions": len(questions),
+            "current_question_index": quiz_state["current_index"],
+            "is_navigation": True
+        }
+    }
 
 
 def handle_clarification_question(
@@ -245,7 +314,7 @@ Keep your response concise (2-3 sentences max).
         
         # Add reminder
         if current_question:
-            full_response = f"{clarification_response}\n\nWhen you're ready, please provide your answer or type 'skip' to move on."
+            full_response = f"{clarification_response}\n\n💡 When you're ready, please provide your answer or type 'skip' to move on."
         else:
             full_response = clarification_response
         
@@ -270,6 +339,7 @@ Keep your response concise (2-3 sentences max).
             }
         }
 
+
 def handle_quiz_completion(
     db: Session,
     chatbot_id: str,
@@ -288,11 +358,9 @@ def handle_quiz_completion(
         employee_id: For people_analyzer mode - person being analyzed
     """
     try:
-        
-        
         quiz_state["completed"] = True
         
-           # Mark unanswered questions as "unmarked"
+        # Mark unanswered questions as "skipped"
         for idx in range(len(questions)):
             if str(idx) not in quiz_state["answers"]:
                 quiz_state["answers"][str(idx)] = {"answer": "skipped"}
@@ -321,7 +389,7 @@ def handle_quiz_completion(
             db.refresh(new_record)
             
             log.info(f"✓ People analyzer completed and saved: {new_record.id}")
-            response = "Assessment completed! Your ratings have been submitted successfully. Thank you!"
+            response = "✅ Assessment completed! Your ratings have been submitted successfully. Thank you!"
         else:
             # Save to Answer table (regular quiz)
             new_record = Answer(
@@ -336,7 +404,7 @@ def handle_quiz_completion(
             db.refresh(new_record)
             
             log.info(f"✓ Quiz completed and saved: {new_record.id}")
-            response = "Quiz completed! Your answers have been submitted successfully. Thank you!"
+            response = "✅ Quiz completed! Your answers have been submitted successfully. Thank you!"
         
         return {
             "response": response,
@@ -468,6 +536,13 @@ def quiz_query_service(
                 }
             }
         
+        # Handle navigation - NEW!
+        if intent == "navigate_previous":
+            return handle_navigation("previous", questions, quiz_state)
+        
+        if intent == "navigate_next":
+            return handle_navigation("next", questions, quiz_state)
+        
         # Handle end quiz
         if intent == "end_quiz":
             return handle_quiz_completion(
@@ -501,7 +576,6 @@ def quiz_query_service(
             
             # Move to next question
             quiz_state["current_index"] += 1
-
             
             if quiz_state["current_index"] >= len(questions):
                 return handle_quiz_completion(
@@ -578,7 +652,7 @@ def quiz_query_service(
             )
             
             progress = build_quiz_progress_summary(quiz_state, len(questions))
-            response = f"Got it! Your Answer recorded.\n\n{progress}\n{formatted_q}"
+            response = f"Got it! Your answer recorded. ✅\n\n{progress}\n{formatted_q}"
             
             return {
                 "response": response,
@@ -589,7 +663,7 @@ def quiz_query_service(
                 }
             }
         
-        # Fallback
+        # Fallback - should rarely reach here now
         current_q_index = quiz_state["current_index"]
         if current_q_index < len(questions):
             current_question = questions[current_q_index]

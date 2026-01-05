@@ -80,6 +80,7 @@ def get_people_analyzer_chatbot_service(
         return None
 
 
+
 def get_employees_service(
     db: Session,
     department: Optional[str] = None,
@@ -96,6 +97,8 @@ def get_employees_service(
         "employees": [],
         "people_analyzer_chatbot": None,
     }
+
+    answered_employee_ids = set()
 
     # ---------- People Analyzer Mode ----------
     if include_chatbot and chatbot_id:
@@ -136,6 +139,23 @@ def get_employees_service(
             f"Base employees from can_review_users: {query.count()}"
         )
 
+        # ---------- Fetch answered employees ----------
+        answered_employee_ids = {
+            row.employee_id
+            for row in db.query(PeopleAnalyzer.employee_id)
+            .filter(
+                PeopleAnalyzer.chatbot_id == chatbot_id,
+                PeopleAnalyzer.created_by == user_id,
+                PeopleAnalyzer.employee_id.isnot(None),
+            )
+            .all()
+        }
+
+        log.info(
+            f"Employees already answered by reviewer {user_id}: "
+            f"{len(answered_employee_ids)}"
+        )
+
     else:
         # ---------- Normal Mode ----------
         query = db.query(Employee)
@@ -161,11 +181,19 @@ def get_employees_service(
     final_count = query.count()
     log.info(f"FINAL employees count: {final_count}")
 
-    response["employees"] = query.order_by(Employee.created_at.asc()).all()
+    employees = query.order_by(Employee.created_at.asc()).all()
+
+    # ---------- Attach has_answered flag ----------
+    response["employees"] = [
+        {
+            **employee.__dict__,
+            "has_answered": employee.id in answered_employee_ids,
+        }
+        for employee in employees
+    ]
 
     log.info("==== get_employees_service END ====")
     return response
-
 # --------------------------------------------------
 # Service: Submit Review
 # --------------------------------------------------
