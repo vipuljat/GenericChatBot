@@ -655,10 +655,9 @@ def get_people_analyzer_responses(
 
 def get_employee_evaluation_service(
     chatbot_id: uuid.UUID,
-    employee_id: uuid.UUID,
     db: Session
 ) -> Dict[str, Any]:
-    """Get individual employee evaluation data for people_analyzer."""
+    """Get all employee evaluation data for people_analyzer by chatbot_id only."""
     
     chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
     if not chatbot:
@@ -693,85 +692,117 @@ def get_employee_evaluation_service(
 
     questions.sort(key=lambda x: x.get("order", 999))
 
-    # Fetch employee info and ratings
+    # Fetch all employee ratings for this chatbot
     RatedEmployee = aliased(Employee)
     RaterEmployee = aliased(Employee)
     
     query = db.query(
         PeopleAnalyzer,
         RatedEmployee.employee_name.label('rated_employee_name'),
+        RatedEmployee.employee_id.label('rated_employee_id'),
+        RatedEmployee.employee_email.label('rated_employee_email'),
         RatedEmployee.department.label('rated_employee_department'),
-        RaterEmployee.employee_name.label('rater_name')
+        RaterEmployee.employee_name.label('rater_name'),
+        RaterEmployee.employee_id.label('rater_employee_id')
     )\
         .join(RatedEmployee, PeopleAnalyzer.employee_id == RatedEmployee.id)\
         .outerjoin(RaterEmployee, PeopleAnalyzer.created_by == RaterEmployee.id)\
-        .filter(
-            PeopleAnalyzer.chatbot_id == chatbot_id,
-            PeopleAnalyzer.employee_id == employee_id
-        )
+        .filter(PeopleAnalyzer.chatbot_id == chatbot_id)
 
     entries = query.all()
 
     if not entries:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No evaluation data found for employee {employee_id}"
-        )
+        return {
+            "chatbot_id": str(chatbot_id),
+            "chatbot_name": chatbot.chatbot_name,
+            "mode": "people_analyzer",
+            "total_evaluations": 0,
+            "evaluations": [],
+            "questions": questions
+        }
 
-    # Calculate statistics
-    employee_name = entries[0][1]
-    employee_department = entries[0][2]
-    total_ratings = len(entries)
+    # Group by rated employee
+    employee_data = {}
     
-    question_stats = {}
-    total_sum = 0
-    total_count = 0
-    responses = []
+    for entry, rated_employee_name, rated_employee_id, rated_employee_email, rated_employee_department, rater_name, rater_employee_id in entries:
+        emp_id = entry.employee_id
+        
+        if emp_id not in employee_data:
+            employee_data[emp_id] = {
+                "employee_id": str(emp_id),
+                "employee_name": rated_employee_name or "Unknown",
+                "employee_email": rated_employee_email or "Unknown",
+                "employee_code": rated_employee_id or "Unknown",
+                "department": rated_employee_department or "Unknown",
+                "total_ratings_received": 0,
+                "question_stats": {},
+                "total_sum": 0,
+                "total_count": 0,
+                "reviews": []
+            }
 
-    for entry, rated_employee_name, rated_employee_department, rater_name in entries:
-        # Store individual response details with rater name
-        response_detail = {
-            "rater_id": entry.created_by,
-            "rater_name": rater_name or "Anonymous",
+        # Store individual review details
+        review_detail = {
+            "review_id": str(entry.id),
+            "reviewer_id": str(entry.created_by) if entry.created_by else None,
+            "reviewer_name": rater_name or "Anonymous",
+            "reviewer_employee_id": rater_employee_id or "Unknown",
             "answers": entry.answers or {},
             "created_at": entry.created_at.isoformat() if entry.created_at else None
         }
-        responses.append(response_detail)
+        employee_data[emp_id]["reviews"].append(review_detail)
+        employee_data[emp_id]["total_ratings_received"] += 1
 
+        # Process answers for statistics
         answers = entry.answers or {}
         for q_id_str, ans_obj in answers.items():
             answer = ans_obj.get("answer") if isinstance(ans_obj, dict) else ans_obj
             if answer == "skipped" or answer is None:
                 continue
 
-            if q_id_str not in question_stats:
-                question_stats[q_id_str] = {"sum": 0, "count": 0}
+            if q_id_str not in employee_data[emp_id]["question_stats"]:
+                employee_data[emp_id]["question_stats"][q_id_str] = {"sum": 0, "count": 0}
 
-            score = {"+": 4, "-": 0, "+-": 2}.get(str(answer).strip(), 0)
-            question_stats[q_id_str]["sum"] += score
-            question_stats[q_id_str]["count"] += 1
+            score = {"+": 4, "-": 0, "+-": 2, "±": 2}.get(str(answer).strip(), 0)
+            employee_data[emp_id]["question_stats"][q_id_str]["sum"] += score
+            employee_data[emp_id]["question_stats"][q_id_str]["count"] += 1
 
-            total_sum += score
-            total_count += 1
+            employee_data[emp_id]["total_sum"] += score
+            employee_data[emp_id]["total_count"] += 1
 
-    # Calculate averages
-    question_averages = {}
-    for q_id, stats in question_stats.items():
-        avg = stats["sum"] / stats["count"] if stats["count"] > 0 else 0
-        question_averages[q_id] = {
-            "average": round(avg, 2),
-            "count": stats["count"]
-        }
+    # Calculate averages and format output
+    evaluations = []
+    for emp_id, data in employee_data.items():
+        question_averages = {}
+        for q_id, stats in data["question_stats"].items():
+            avg = stats["sum"] / stats["count"] if stats["count"] > 0 else 0
+            question_averages[q_id] = {
+                "average": round(avg, 2),
+                "count": stats["count"]
+            }
 
-    overall_average = round(total_sum / total_count, 2) if total_count > 0 else 0
+        overall_average = round(data["total_sum"] / data["total_count"], 2) if data["total_count"] > 0 else 0
+
+        evaluations.append({
+            "employee_id": data["employee_id"],
+            "employee_name": data["employee_name"],
+            "employee_email": data["employee_email"],
+            "employee_code": data["employee_code"],
+            "department": data["department"],
+            "total_ratings_received": data["total_ratings_received"],
+            "overall_average": overall_average,
+            "question_averages": question_averages,
+            "reviews": data["reviews"]
+        })
+
+    # Sort by overall_average descending
+    evaluations.sort(key=lambda x: x["overall_average"], reverse=True)
 
     return {
-        "employee_id": str(employee_id),
-        "employee_name": employee_name,
-        "department": employee_department,
-        "total_ratings": total_ratings,
-        "overall_average": overall_average,
-        "question_averages": question_averages,
-        "responses": responses,
+        "chatbot_id": str(chatbot_id),
+        "chatbot_name": chatbot.chatbot_name,
+        "mode": "people_analyzer",
+        "total_evaluations": len(evaluations),
+        "evaluations": evaluations,
         "questions": questions
     }

@@ -504,15 +504,14 @@ def get_chatbot_responses(
     return get_chatbot_responses_service(chatbot_id, department, db)
 
 
-@router.get("/evaluation/{chatbot_id}/{employee_id}")
+@router.get("/evaluation/{chatbot_id}")
 def get_employee_evaluation(
     request: Request,
     chatbot_id: uuid.UUID,
-    employee_id: uuid.UUID,
     db: Session = Depends(get_db),
 ):
-    """Get individual employee evaluation data for people analyzer."""
+    """Get all employee evaluation data for people analyzer by chatbot_id."""
     # Optional: Verify user has permission to view this data
     # user_info = get_current_employee_from_token(request, db)
     
-    return get_employee_evaluation_service(chatbot_id, employee_id, db)
+    return get_employee_evaluation_service(chatbot_id, db)
