@@ -149,21 +149,49 @@ async def create_chatbot_endpoint(
 @router.patch("/{chatbot_id}", summary="Update chatbot")
 async def update_chatbot_endpoint(
     chatbot_id: str,
-    payload: ChatbotUpdate,
-    db: Session = Depends(get_db)
+    status: Optional[str] = Form(None),
+    description: Optional[str] = Form(None),
+    instruction: Optional[str] = Form(None),
+    mode: Optional[str] = Form(None),
+    questions: Optional[str] = Form(None),  # JSON string
+    employee_ids: Optional[str] = Form(None),  # JSON string
+    access_list: Optional[str] = Form(None),  # JSON string
+    documents: List[UploadFile] = File(default=[]),
+    db: Session = Depends(get_db),
+    background_tasks: BackgroundTasks = BackgroundTasks()
 ):
-    """Update chatbot settings."""
+    """Update chatbot settings and optionally upload new documents."""
+    
+    import json
+    
+    # Parse JSON strings
+    parsed_questions = json.loads(questions) if questions else None
+    parsed_employee_ids = json.loads(employee_ids) if employee_ids else None
+    parsed_access_list = json.loads(access_list) if access_list else None
+    
+    # Handle document uploads
+    doc_contents = []
+    doc_names = []
+    
+    if documents:
+        for doc in documents:
+            content = await doc.read()
+            doc_contents.append(content)
+            doc_names.append(doc.filename)
 
     chatbot = update_chatbot(
         db=db,
         chatbot_id=uuid.UUID(chatbot_id),
-        status=payload.status,
-        description=payload.description,
-        instruction=payload.instruction,
-        mode=payload.mode,
-        questions=payload.questions,
-        employee_ids=payload.employee_ids,
-        access_list=payload.access_list,
+        status=status,
+        description=description,
+        instruction=instruction,
+        mode=mode,
+        questions=parsed_questions,
+        employee_ids=parsed_employee_ids,
+        access_list=parsed_access_list,
+        doc_contents=doc_contents if doc_contents else None,
+        doc_names=doc_names if doc_names else None,
+        background_tasks=background_tasks
     )
     
     return {
@@ -282,12 +310,12 @@ async def get_chatbot_endpoint(
                 "reviewer_id": str(perm.reviewer_id),
                 "allowed_users": perm.can_review_users or []
             })
-        
-        # Get allowed users
-        access = db.query(ChatbotAccess).filter(
-            ChatbotAccess.chatbot_id == chatbot_id
-        ).first()
-        employee_ids = access.allowed_users if access else []
+    
+    # Get allowed users for ALL modes
+    access = db.query(ChatbotAccess).filter(
+        ChatbotAccess.chatbot_id == chatbot_id
+    ).first()
+    employee_ids = access.allowed_users if access else []
     
     return {
         "chatbot_id": str(chatbot.chatbot_id),
