@@ -661,7 +661,10 @@ def quiz_query_service(
                 word_to_symbol = {
                     "positive": "+",
                     "negative": "-",
-                    "average": "+-"
+                    "average": "+-",
+                    "partial": "+-",
+                    "partially": "+-",
+                    "neutral": "+-"
                 }
                 
                 query_lower = query.strip().lower()
@@ -669,7 +672,7 @@ def quiz_query_service(
                     query = word_to_symbol[query_lower]
                 
                 # Validate answer is one of the valid symbols
-                valid_answers = ["+", "-", "±", "+-"]
+                valid_answers = ["+", "-", "±", "+-", "-+"]
                 if query.strip() not in valid_answers:
                     # Not a valid people analyzer answer - treat as clarification request
                     current_question = questions[current_q_index]
@@ -722,9 +725,14 @@ Respond in a helpful, clarifying manner:"""
             # ========================================================================
             # STORE ANSWER - This is where answers are saved
             # ========================================================================
+            # Normalize the answer format (convert -+ to +-)
+            normalized_answer = query
+            if query.strip() == "-+":
+                normalized_answer = "+-"
+            
             # Store the answer in quiz_state
             quiz_state["answers"][str(current_q_index)] = {
-                "answer": query
+                "answer": normalized_answer
             }
             
             # Add to attempted list if not already there

@@ -120,7 +120,6 @@ class QdrantManager:
 # --------------------------
 
 db_manager = DatabaseManager(config.DATABASE_URL)
-print(config.QDRANT_HOST, config.QDRANT_PORT)
 qdrant_manager = QdrantManager(config.QDRANT_HOST, config.QDRANT_PORT)
 
 
@@ -152,7 +151,6 @@ def check_db_health() -> bool:
 
 def check_qdrant_health() -> bool:
     """Check Qdrant health status."""
-    print(config.QDRANT_HOST, config.QDRANT_PORT)
     return qdrant_manager.check_health()
 
 
