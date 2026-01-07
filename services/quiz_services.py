@@ -61,6 +61,10 @@ def detect_user_intent(user_message: str, chatbot_mode: str = "quiz") -> str:
         if any(phrase in msg_lower for phrase in next_phrases):
             return "navigate_next"
         
+        # Direct question number navigation (e.g., "Question 1", "question 5")
+        if re.match(r'^question\s+\d+$', msg_lower):
+            return "navigate_direct"
+        
         # End quiz detection
         end_phrases = ['end quiz', 'finish quiz', 'stop quiz', 'submit quiz', 'i am done', "i'm done", 'submit']
         if any(phrase in msg_lower for phrase in end_phrases):
@@ -571,6 +575,40 @@ def quiz_query_service(
         
         if intent == "navigate_next":
             return handle_navigation("next", questions, quiz_state)
+        
+        # Handle direct question navigation (e.g., "Question 1", "Question 5")
+        if intent == "navigate_direct":
+            match = re.match(r'question\s+(\d+)', query.lower())
+            if match:
+                question_num = int(match.group(1))
+                target_index = question_num - 1  # Convert to 0-based index
+                
+                if 0 <= target_index < len(questions):
+                    quiz_state["current_index"] = target_index
+                    target_question = questions[target_index]
+                    formatted_q = format_question_for_display(
+                        target_question,
+                        target_index,
+                        len(questions)
+                    )
+                    
+                    return {
+                        "response": formatted_q,
+                        "quiz_state": quiz_state,
+                        "metadata": {
+                            "total_questions": len(questions),
+                            "current_question_index": target_index
+                        }
+                    }
+                else:
+                    return {
+                        "response": f"Invalid question number. Please choose between 1 and {len(questions)}.",
+                        "quiz_state": quiz_state,
+                        "metadata": {
+                            "total_questions": len(questions),
+                            "current_question_index": quiz_state["current_index"]
+                        }
+                    }
         
         # Handle end quiz
         if intent == "end_quiz":

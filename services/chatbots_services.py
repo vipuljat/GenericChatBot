@@ -265,6 +265,7 @@ def update_chatbot(
     mode: Optional[str] = None,
     doc_contents: Optional[List[bytes]] = None,
     doc_names: Optional[List[str]] = None,
+    deleted_documents: Optional[List[str]] = None,
     questions: Optional[dict] = None,
     employee_ids: Optional[List[str]] = None,
     access_list: Optional[List[Dict[str, Any]]] = None,  # [{"reviewer_id": "...", "can_review_users": [...]}]
@@ -296,8 +297,18 @@ def update_chatbot(
             chatbot.meta_data = meta_data
         if mode is not None:
             chatbot.mode = mode
+        
+        # Handle document deletions
+        if deleted_documents is not None and chatbot.pdf_names:
+            chatbot.pdf_names = [doc for doc in chatbot.pdf_names if doc not in deleted_documents]
+            log.info(f"Removed {len(deleted_documents)} document(s) from {chatbot.chatbot_name}")
+        
+        # Append new documents to existing ones instead of replacing
         if doc_names is not None:
-            chatbot.pdf_names = doc_names
+            if chatbot.pdf_names:
+                chatbot.pdf_names = chatbot.pdf_names + doc_names
+            else:
+                chatbot.pdf_names = doc_names
 
         # ── Update ChatbotAccess (who can access the chatbot) ──────────────────
         if employee_ids is not None:

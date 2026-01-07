@@ -156,6 +156,7 @@ async def update_chatbot_endpoint(
     questions: Optional[str] = Form(None),  # JSON string
     employee_ids: Optional[str] = Form(None),  # JSON string
     access_list: Optional[str] = Form(None),  # JSON string
+    deleted_documents: Optional[str] = Form(None),  # JSON string - list of document names to delete
     documents: List[UploadFile] = File(default=[]),
     db: Session = Depends(get_db),
     background_tasks: BackgroundTasks = BackgroundTasks()
@@ -168,6 +169,7 @@ async def update_chatbot_endpoint(
     parsed_questions = json.loads(questions) if questions else None
     parsed_employee_ids = json.loads(employee_ids) if employee_ids else None
     parsed_access_list = json.loads(access_list) if access_list else None
+    parsed_deleted_documents = json.loads(deleted_documents) if deleted_documents else None
     
     # Handle document uploads
     doc_contents = []
@@ -189,6 +191,7 @@ async def update_chatbot_endpoint(
         questions=parsed_questions,
         employee_ids=parsed_employee_ids,
         access_list=parsed_access_list,
+        deleted_documents=parsed_deleted_documents,
         doc_contents=doc_contents if doc_contents else None,
         doc_names=doc_names if doc_names else None,
         background_tasks=background_tasks
