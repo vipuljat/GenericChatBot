@@ -21,9 +21,9 @@ genai.configure(api_key=config.GEMINI_API_KEY)
 def retrieve_context(
     chatbot_name: str,
     query: str,
-    top_k: int = 10,
-    min_score: float = 0.55,
-    max_context_chars: int = 4000,
+    top_k: int = 20,  # Increased for better coverage
+    min_score: float = 0.4,  # Lowered to retrieve more potentially relevant chunks
+    max_context_chars: int = 6000,  # Increased to allow more context
     document_type: Optional[str] = None
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """
@@ -31,7 +31,7 @@ def retrieve_context(
     Returns: (formatted_context, source_chunks)
     
     NO LLM CALLS - JUST RETRIEVAL.
-    Logs embedding cost.
+    Logs embedding cost and prints retrieved chunks for debugging.
     """
     # Generate query embedding ONCE with cost logging
     log.info(f"🔍 Retrieving context for: {query[:60]}...")
@@ -51,12 +51,12 @@ def retrieve_context(
         log.info("No relevant context found")
         return "", []
     
-    # Format context
+    # Format context and log chunks
     context_parts = []
     total_chars = 0
     valid_chunks = []
     
-    for chunk in chunks:
+    for idx, chunk in enumerate(chunks, 1):
         text = chunk.get('text', '').strip()
         if not text or len(text) < 20:
             continue
@@ -68,6 +68,11 @@ def retrieve_context(
         
         if total_chars + len(chunk_text) > max_context_chars:
             break
+        
+        # Log each retrieved chunk for debugging
+        log.info(f"Retrieved Chunk {idx}/{len(chunks)} (Score: {chunk.get('score', 0):.3f}):")
+        log.info(f"{chunk_text[:500]}..." if len(chunk_text) > 500 else chunk_text)
+        log.info("---")  # Separator for clarity
         
         context_parts.append(chunk_text)
         valid_chunks.append(chunk)
@@ -156,8 +161,8 @@ def generate_rag_response(
     chatbot_name: str,
     chatbot_instructions: Optional[str] = None,
     conversation_history: Optional[List[Dict[str, str]]] = None,
-    top_k: int = 10,
-    min_score: float = 0.5,
+    top_k: int = 20,
+    min_score: float = 0.4,
     max_retries: int = 3,
     model_name: Optional[str] = None
 ) -> Dict[str, Any]:
