@@ -1,13 +1,3 @@
-"""
-Refactored Chatbot Service - FUNCTIONAL APPROACH
-"""
-
-# ============================================================================
-# services/chatbot_service.py - FUNCTIONAL CHATBOT CRUD
-# ============================================================================
-
-"""Functional chatbot CRUD service."""
-
 import uuid
 from typing import List, Optional, Dict, Any
 from fastapi.encoders import jsonable_encoder

@@ -219,10 +219,21 @@ def generate_embeddings_batch(
 # ============================================================================
 
 def clean_text(text: str) -> str:
-    """Clean and normalize text."""
-    text = re.sub(r'\s+', ' ', text)
-    text = text.replace('\x00', '')
+    """Clean and normalize text more aggressively."""
+    # Remove multiple whitespaces, newlines, and special characters
+    text = re.sub(r'\s+', ' ', text)  # Replace all whitespace with single space
+    text = re.sub(r'[\n\r\t\f\v]+', ' ', text)  # Extra newline handling
+    text = text.replace('\x00', '')  # Null bytes
+    text = re.sub(r'[-_]{2,}', ' ', text)  # Multiple dashes/underscores
     return text.strip()
+
+
+def split_by_sentences(text: str) -> List[str]:
+    """Improved sentence splitting using regex for better semantic chunks."""
+    # Split on sentence boundaries: . ! ? followed by space or capital letter
+    sentence_end = re.compile(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|\!)\s')
+    sentences = sentence_end.split(text)
+    return [s.strip() for s in sentences if s.strip()]
 
 
 def split_by_chars(text: str, chunk_size: int, overlap: int) -> List[str]:
@@ -230,9 +241,9 @@ def split_by_chars(text: str, chunk_size: int, overlap: int) -> List[str]:
     chunks = []
     start = 0
     while start < len(text):
-        end = start + chunk_size
+        end = min(start + chunk_size, len(text))
         chunks.append(text[start:end])
-        start += chunk_size - overlap
+        start = end - overlap if end - overlap > start else start + 1  # Ensure progress
     return chunks
 
 
@@ -242,7 +253,7 @@ def split_by_separators(
     chunk_size: int,
     overlap: int
 ) -> List[str]:
-    """Recursively split text using separator hierarchy."""
+    """Recursively split text using separator hierarchy with improved overlap handling."""
     if not separators or not separators[0]:
         return split_by_chars(text, chunk_size, overlap)
     
@@ -251,20 +262,27 @@ def split_by_separators(
     
     sep = separators[0]
     remaining_seps = separators[1:]
-    splits = text.split(sep)
+    splits = re.split(f'({re.escape(sep)})', text)  # Preserve separators
     
     chunks = []
-    current_parts = []
+    current_chunk = ""
     current_len = 0
     
     for split in splits:
-        split_len = len(split) + len(sep)
+        if not split:
+            continue
+        
+        split_len = len(split)
         
         # If single split is too large, recursively split it
         if split_len > chunk_size:
-            if current_parts:
-                chunks.append(sep.join(current_parts))
-                current_parts = []
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+                # Add overlap from end of previous chunk
+                overlap_text = current_chunk[-overlap:] if overlap < len(current_chunk) else current_chunk
+                current_chunk = overlap_text
+                current_len = len(overlap_text)
+            else:
                 current_len = 0
             
             sub_chunks = split_by_separators(split, remaining_seps, chunk_size, overlap)
@@ -272,59 +290,67 @@ def split_by_separators(
             continue
         
         # Check if adding this split exceeds chunk size
-        if current_len + split_len > chunk_size and current_parts:
-            chunks.append(sep.join(current_parts))
-            
-            # Add overlap
-            if current_len > overlap:
-                overlap_parts = current_parts[-(len(current_parts)//2):]
-                current_parts = overlap_parts
-                current_len = sum(len(s) + len(sep) for s in overlap_parts)
+        if current_len + split_len > chunk_size:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+                # Add overlap from end
+                overlap_text = current_chunk[-overlap:] if overlap < len(current_chunk) else current_chunk
+                current_chunk = overlap_text
+                current_len = len(overlap_text)
             else:
-                current_parts = []
                 current_len = 0
         
-        current_parts.append(split)
+        current_chunk += split
         current_len += split_len
     
-    if current_parts:
-        chunks.append(sep.join(current_parts))
+    if current_chunk:
+        chunks.append(current_chunk.strip())
     
-    return chunks
+    return [c for c in chunks if c]
 
 
 def chunk_text(
     text: str,
     metadata: Optional[Dict[str, Any]] = None,
-    chunk_size: int = 1200,
-    overlap: int = 200
+    chunk_size: int = 600,  # Reduced for more granular chunks
+    overlap: int = 150  # Increased overlap for better context continuity
 ) -> List[Dict[str, Any]]:
     """
     Split text into overlapping chunks with metadata.
-    Pure functional approach.
+    Improved for better semantic splitting.
     """
     if not text or not text.strip():
         return []
     
     text = clean_text(text)
     
-    # Separator hierarchy: paragraphs → sentences → words → chars
-    separators = ['\n\n', '\n', '. ', '! ', '? ', '; ', ', ', ' ', '']
+    # First, split into sentences for semantic chunks
+    sentences = split_by_sentences(text)
+    
+    # Separator hierarchy: now starting from paragraphs, then sentences (already split), words, chars
+    separators = ['\n\n', '\n', ' ', '']
+    
+    # Join sentences back and split using hierarchy
+    text = ' '.join(sentences)  # Rejoin for hierarchical splitting
     chunks = split_by_separators(text, separators, chunk_size, overlap)
     
     # Build chunk dictionaries
-    result = [
-        {
+    result = []
+    for i, chunk in enumerate(chunks):
+        if len(chunk) < 50:  # Skip very small chunks
+            continue
+        chunk_dict = {
             "text": chunk,
             "chunk_index": i,
             "total_chunks": len(chunks),
             "char_count": len(chunk),
             **(metadata or {})
         }
-        for i, chunk in enumerate(chunks)
-    ]
+        result.append(chunk_dict)
+        # Log sample of chunk for debugging
+        log.info(f"Generated Chunk {i+1}/{len(chunks)}: {chunk[:200]}...")
     
-    log.info(f"Chunked text into {len(result)} chunks")
+    log.info(f"Chunked text into {len(result)} chunks (size={chunk_size}, overlap={overlap})")
     return result
 
 
@@ -335,8 +361,8 @@ def chunk_text(
 def process_document_for_embedding(
     text: str,
     metadata: Optional[Dict[str, Any]] = None,
-    chunk_size: int = 1200,
-    overlap: int = 200
+    chunk_size: int = 600,  # Smaller chunks for better retrieval
+    overlap: int = 150  # Better overlap
 ) -> List[Dict[str, Any]]:
     """
     Complete pipeline: chunk text and generate embeddings.
