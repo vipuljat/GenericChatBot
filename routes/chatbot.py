@@ -441,7 +441,6 @@ async def submit_quiz_endpoint(
     
     # Prevent people_analyzer submissions
     mode = str(chatbot.mode).lower() if chatbot.mode else ''
-    print("Chatbot mode:",mode)
     if mode in ['people_analyzer', 'people-analyzer']:
         new_answer = PeopleAnalyzer(
             id=uuid.uuid4(),

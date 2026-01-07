@@ -113,7 +113,6 @@ def generate_with_retry(
     """
     backoff = 2
     last_error = None
-    print("prompt", prompt)
     for attempt in range(1, max_retries + 1):
         try:
             model = genai.GenerativeModel(model_name)

@@ -25,9 +25,13 @@ from utils.logging import log
 # Import functional services
 from utils.embedding import process_document_for_embedding
 from services.vectore_store_service import (
+    collection_exists,
     create_collection,
+    get_collection_info,
     upsert_points,
-    delete_collection
+    delete_collection,
+    delete_points_by_source_file,
+    get_existing_source_files
 )
 from utils.token_decode import get_current_employee_from_token
 
@@ -58,18 +62,37 @@ def save_questions(db: Session, chatbot_id: uuid.UUID, questions: dict):
 def process_documents_background(
     chatbot_name: str,
     doc_contents: List[bytes],
-    doc_names: List[str]
+    doc_names: List[str],
+    append_mode: bool = True,
+    replace_existing_files: bool = False
 ):
     """
     Background task: Process documents and store embeddings.
     
-    KEY: Embeddings generated ONCE per chunk with cost logging.
+    Args:
+        chatbot_name: Name of the chatbot/collection
+        doc_contents: List of document contents as bytes
+        doc_names: List of document filenames
+        append_mode: If True, append to existing collection. If False, recreate collection.
+        replace_existing_files: If True, delete existing points for files with same name before adding
     """
     try:
-        log.info(f"📄 Processing {len(doc_contents)} documents for '{chatbot_name}'")
+        log.info(f"📄 Processing {len(doc_contents)} documents for '{chatbot_name}' (append_mode={append_mode})")
         
         all_points = []
-        point_id = 0
+        
+        # Check if collection exists for append mode
+        collection_exists_flag = collection_exists(chatbot_name)
+        
+        # If replacing existing files, delete old points for those files first
+        if append_mode and collection_exists_flag and replace_existing_files:
+            for doc_name in doc_names:
+                try:
+                    deleted_count = delete_points_by_source_file(chatbot_name, doc_name)
+                    if deleted_count > 0:
+                        log.info(f"🗑️ Deleted {deleted_count} existing points for file: {doc_name}")
+                except Exception as e:
+                    log.warning(f"⚠️ Could not delete existing points for {doc_name}: {e}")
         
         # Process each document
         for doc_content, doc_name in zip(doc_contents, doc_names):
@@ -103,10 +126,13 @@ def process_documents_background(
                 
                 log.info(f"✓ {len(chunks_with_embeddings)} chunks with embeddings")
                 
-                # Prepare Qdrant points
+                # Prepare Qdrant points with UUID-based IDs to avoid collisions
                 for chunk in chunks_with_embeddings:
+                    # Use UUID for point ID to guarantee uniqueness
+                    point_id = str(uuid.uuid4())
+                    
                     point = PointStruct(
-                        id=point_id,
+                        id=point_id,  # UUID string instead of sequential int
                         vector=chunk['embedding'],
                         payload={
                             'text': chunk['text'],
@@ -119,7 +145,6 @@ def process_documents_background(
                         }
                     )
                     all_points.append(point)
-                    point_id += 1
             
             except Exception as e:
                 log.error(f"❌ Error processing {doc_name}: {e}", exc_info=True)
@@ -129,20 +154,28 @@ def process_documents_background(
             log.error(f"❌ No embeddings generated for '{chatbot_name}'")
             return
         
-        # Create collection and upload
+        # Create or update collection
         vector_size = len(all_points[0].vector)
-        create_collection(
-            collection_name=chatbot_name,
-            vector_size=vector_size,
-            force_recreate=True
-        )
         
+        if append_mode and collection_exists_flag:
+            # Just append points to existing collection
+            log.info(f"➕ Appending {len(all_points)} new points to existing collection")
+        else:
+            # Create new collection
+            log.info(f"🆕 Creating new collection with {len(all_points)} points")
+            create_collection(
+                collection_name=chatbot_name,
+                vector_size=vector_size,
+                force_recreate=True
+            )
+        
+        # Upload points (works for both new and existing collections)
         upsert_points(
             collection_name=chatbot_name,
             points=all_points
         )
         
-        log.info(f"✅ Stored {len(all_points)} embeddings for '{chatbot_name}'")
+        log.info(f"✅ {'Appended' if append_mode and collection_exists_flag else 'Stored'} {len(all_points)} embeddings for '{chatbot_name}'")
     
     except Exception as e:
         log.error(f"❌ Background processing failed: {e}", exc_info=True)
@@ -167,7 +200,7 @@ def create_chatbot(
     employee_ids: Optional[List[str]] = None,
     access_list: Optional[List[str]] = None,
     background_tasks: Optional[BackgroundTasks] = None,
-    db: Session=Depends(get_db)
+    db: Session = Depends(get_db)
 ) -> Chatbot:
     """Create chatbot and schedule document processing."""
     try:
@@ -227,8 +260,8 @@ def create_chatbot(
 
                 permission = ChatbotPermission(
                     chatbot_id=chatbot.chatbot_id,
-                    reviewer_id=employee_id,               # reviwer
-                    can_review_users=allowed_to_review,    # people who reviewer can give feedback
+                    reviewer_id=employee_id,
+                    can_review_users=allowed_to_review,
                 )
                 db.add(permission)
                 db.commit()
@@ -240,7 +273,8 @@ def create_chatbot(
                 process_documents_background,
                 chatbot_name=chatbot_name,
                 doc_contents=doc_contents,
-                doc_names=doc_names
+                doc_names=doc_names,
+                append_mode=False  # New chatbot, create fresh collection
             )
             log.info(f"Scheduled: {len(doc_names)} documents")
         
@@ -267,14 +301,23 @@ def update_chatbot(
     doc_names: Optional[List[str]] = None,
     questions: Optional[dict] = None,
     employee_ids: Optional[List[str]] = None,
-    access_list: Optional[List[Dict[str, Any]]] = None,  # [{"reviewer_id": "...", "can_review_users": [...]}]
+    access_list: Optional[List[Dict[str, Any]]] = None,
+    replace_documents: bool = False,  # NEW: Option to replace all documents
     background_tasks: Optional[BackgroundTasks] = None
 ) -> Chatbot:
-
+    """
+    Update chatbot with optional document handling.
+    
+    Args:
+        replace_documents: If True, deletes all existing documents and replaces with new ones.
+                          If False (default), appends new documents to existing ones.
+    """
     try:
         chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
         if not chatbot:
             raise HTTPException(status_code=404, detail="Chatbot not found")
+
+        original_chatbot_name = chatbot.chatbot_name
 
         # Name uniqueness check
         if chatbot_name and chatbot_name != chatbot.chatbot_name:
@@ -296,12 +339,20 @@ def update_chatbot(
             chatbot.meta_data = meta_data
         if mode is not None:
             chatbot.mode = mode
+        
+        # Handle document names in database
         if doc_names is not None:
-            chatbot.pdf_names = doc_names
+            if replace_documents:
+                # Replace all document names
+                chatbot.pdf_names = doc_names
+            else:
+                # Append new document names to existing list (avoid duplicates)
+                existing_names = chatbot.pdf_names or []
+                new_names = [name for name in doc_names if name not in existing_names]
+                chatbot.pdf_names = existing_names + new_names
 
         # ── Update ChatbotAccess (who can access the chatbot) ──────────────────
         if employee_ids is not None:
-            # We usually expect one record per chatbot from creator
             access = db.query(ChatbotAccess).filter(
                 ChatbotAccess.chatbot_id == chatbot_id,
                 ChatbotAccess.created_by == chatbot.generated_by
@@ -320,7 +371,6 @@ def update_chatbot(
 
         # ── Update ChatbotPermission (review permissions) ──────────────────────
         if access_list is not None:
-            # Full replace strategy (common & simple)
             db.query(ChatbotPermission).filter(
                 ChatbotPermission.chatbot_id == chatbot_id
             ).delete()
@@ -333,7 +383,7 @@ def update_chatbot(
                     continue
 
                 permission = ChatbotPermission(
-                    id=uuid.uuid4(),  # explicit if you want
+                    id=uuid.uuid4(),
                     chatbot_id=chatbot.chatbot_id,
                     reviewer_id=reviewer_id,
                     can_review_users=can_review_users
@@ -349,14 +399,36 @@ def update_chatbot(
         db.commit()
         db.refresh(chatbot)
 
-        # New documents in background
+        # Handle document processing in background
         if doc_contents and doc_names and background_tasks:
-            background_tasks.add_task(
-                process_documents_background,
-                chatbot_name=chatbot.chatbot_name,
-                doc_contents=doc_contents,
-                doc_names=doc_names
-            )
+            # Use the current chatbot name (might have been updated)
+            target_collection_name = chatbot.chatbot_name
+            
+            if replace_documents:
+                # Delete entire collection and recreate
+                log.info(f"🔄 Replacing all documents - will recreate collection")
+                background_tasks.add_task(
+                    process_documents_background,
+                    chatbot_name=target_collection_name,
+                    doc_contents=doc_contents,
+                    doc_names=doc_names,
+                    append_mode=False,  # Recreate collection
+                    replace_existing_files=False
+                )
+            else:
+                # Append new documents
+                log.info(f"➕ Appending new documents to existing collection")
+                background_tasks.add_task(
+                    process_documents_background,
+                    chatbot_name=target_collection_name,
+                    doc_contents=doc_contents,
+                    doc_names=doc_names,
+                    append_mode=True,  # Append to existing
+                    replace_existing_files=True  # But replace if same filename exists
+                )
+            
+            mode_str = "replacing all" if replace_documents else "appending"
+            log.info(f"📅 Scheduled: {len(doc_names)} documents ({mode_str} mode)")
 
         log.info(f"Chatbot updated successfully: {chatbot.chatbot_id}")
         return chatbot
@@ -367,6 +439,7 @@ def update_chatbot(
         db.rollback()
         log.error(f"Update failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 def delete_chatbot_by_id(db: Session, chatbot_id: uuid.UUID) -> bool:
     """Delete chatbot and its vector collection."""
@@ -385,6 +458,12 @@ def delete_chatbot_by_id(db: Session, chatbot_id: uuid.UUID) -> bool:
         
         # Delete questions
         db.query(Question).filter(Question.chatbot_id == chatbot_id).delete()
+        
+        # Delete chatbot access records
+        db.query(ChatbotAccess).filter(ChatbotAccess.chatbot_id == chatbot_id).delete()
+        
+        # Delete chatbot permissions
+        db.query(ChatbotPermission).filter(ChatbotPermission.chatbot_id == chatbot_id).delete()
         
         # Delete chatbot
         db.delete(chatbot)
@@ -493,7 +572,7 @@ def get_quiz_responses(chatbot_id: uuid.UUID, db: Session) -> Dict[str, Any]:
 
         formatted_attempts.append({
             "attempt_id": str(attempt.id),
-            "employee_id": attempt.attempter_by_id  ,
+            "employee_id": attempt.attempter_by_id,
             "employee_name": employee.employee_name if employee else "Unknown",
             "department": employee.department if employee else None,
             "attempted_count": attempted_count,
@@ -508,6 +587,8 @@ def get_quiz_responses(chatbot_id: uuid.UUID, db: Session) -> Dict[str, Any]:
         "total_attempts": len(formatted_attempts),
         "attempts": formatted_attempts
     }
+
+
 def get_people_analyzer_responses(
     chatbot_id: uuid.UUID,
     department: Optional[str],
