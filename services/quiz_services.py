@@ -85,9 +85,10 @@ Classify as ONE of these intents:
 6. "navigate_next" - User wants to move to next question (e.g., "next question")
 7. "start" - treat as greeting
 
+
 Respond with ONLY ONE WORD: clarification_question, skip, answer, end_quiz, navigate_previous, or navigate_next.
 
-NOTE: if user use +, _ or +-, it will be considered as answer.
+NOTE: if user use +, _ or +- 8. "Agree or Disagree, Partially Agree or agree disagree etc", it will be considered as answer.
 
 Examples:
 "explain" -> clarification_question
