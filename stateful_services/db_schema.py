@@ -92,3 +92,21 @@ class ChatbotAccess(Base):
     allowed_users=Column(JSONB, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class HRNotification(Base):
+    __tablename__ = "hr_notifications"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    employee_id = Column(UUID(as_uuid=True), ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    chatbot_id = Column(UUID(as_uuid=True), ForeignKey("chatbots.chatbot_id", ondelete="CASCADE"), nullable=False)
+    chatbot_type = Column(String, nullable=False)  # 'quiz', 'people_analyzer', 'general'
+    priority = Column(String, nullable=False, default="high")  # 'high', 'medium', 'low'
+    status = Column(String, nullable=False, default="unread")  # 'unread', 'in_progress', 'resolved'
+    issue_summary = Column(Text, nullable=False)
+    conversation_context = Column(JSONB, nullable=True)  # Full chat history
+    employee_feedback = Column(Text, nullable=True)  # Additional employee comments
+    assigned_to = Column(UUID(as_uuid=True), ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)  # HR rep
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
