@@ -147,9 +147,9 @@ def generate_embeddings_batch(
     Generate embeddings for multiple texts.
     Automatically logs cost for each batch.
     """
-    global _use_gemini
+    global _use_gemini      
     
-    _ensure_initialized()
+    _ensure_initialized()     # Ensure client is initialized
     
     # Log total estimated cost
     total_cost = estimate_embedding_cost(texts)

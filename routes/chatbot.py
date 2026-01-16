@@ -10,6 +10,11 @@ from stateful_services.database import get_db
 from stateful_services.db_schema import Chatbot, ChatbotAccess, PeopleAnalyzer, Question, Answer, Employee, ChatbotPermission
 from utils.document_service import is_supported_document, get_supported_extensions
 from utils.logging import log
+import os
+import time
+import httpx
+from fastapi import HTTPException, Query
+from services.chatbots_services import sync_kestrel_employees_service
 
 # Import functional services
 from services.chatbots_services import (
@@ -24,7 +29,8 @@ from services.quiz_services import quiz_query_service
 from utils.token_decode import get_current_employee_from_token
 
 router = APIRouter()
-
+KESTREL_BASE_URL = os.getenv("KESTREL_BASE_URL")
+KESTREL_API_KEY = os.getenv("KESTREL_API_KEY")
 
 # ============================================================================
 # REQUEST MODELS
@@ -76,7 +82,7 @@ async def create_chatbot_endpoint(
     instruction: Optional[str] = Form(None),
     generated_by: Optional[str] = Form(None),
     meta_data: Optional[str] = Form(None),
-    documents: List[UploadFile] = File(default=[]),
+    documents: List[UploadFile] = File(default=[]), 
     mode: Optional[str] = Form("general"),
     questions: Optional[str] = Form(None),
     employee_ids: Optional[str] = Form(None),
@@ -445,6 +451,20 @@ async def submit_quiz_endpoint(
     # Prevent people_analyzer submissions
     mode = str(chatbot.mode).lower() if chatbot.mode else ''
     if mode in ['people_analyzer', 'people-analyzer']:
+        # Check for duplicate submission: same reviewer reviewing the same employee
+        if payload.user_id and payload.employee_id:
+            existing_review = db.query(PeopleAnalyzer).filter(
+                PeopleAnalyzer.chatbot_id == uuid.UUID(payload.chatbot_id),
+                PeopleAnalyzer.created_by == payload.user_id,
+                PeopleAnalyzer.employee_id == payload.employee_id
+            ).first()
+            
+            if existing_review:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"You have already submitted a review for this employee. Duplicate submissions are not allowed."
+                )
+        
         new_answer = PeopleAnalyzer(
             id=uuid.uuid4(),
             chatbot_id=uuid.UUID(payload.chatbot_id),
@@ -453,6 +473,19 @@ async def submit_quiz_endpoint(
             employee_id=payload.employee_id
         )
     else:
+        # Check for duplicate submission: same employee submitting for the same quiz/chatbot
+        if payload.user_id:
+            existing_answer = db.query(Answer).filter(
+                Answer.chatbot_id == uuid.UUID(payload.chatbot_id),
+                Answer.attempter_by_id == payload.user_id
+            ).first()
+            
+            if existing_answer:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"You have already submitted a response for this quiz. Duplicate submissions are not allowed."
+                )
+        
         new_answer = Answer(
             id=uuid.uuid4(),
             chatbot_id=uuid.UUID(payload.chatbot_id),
@@ -545,3 +578,156 @@ def get_employee_evaluation(
     # user_info = get_current_employee_from_token(request, db)
     
     return get_employee_evaluation_service(chatbot_id, db)
+
+
+
+   #Token Cache
+_kestrel_token_cache = {
+    "token": None,
+    "expires_at": 0
+}
+
+#  Reuse one HTTP client
+_kestrel_client = httpx.AsyncClient(
+timeout=httpx.Timeout(connect=10.0, read=20.0, write=20.0, pool=20.0)
+)
+
+SUPPORTED_SORT_BY = {"name", "email", "employeeCode", "teamName"}
+SUPPORTED_SORT_ORDER = {"ASC", "DESC"}
+
+
+async def get_kestrel_token() -> str:
+    """
+    Step 1: Generate Authorization token from Kestrel
+    POST /generate-key
+    Uses caching to avoid repeated token generation.
+    """
+    if not KESTREL_BASE_URL or not KESTREL_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="KESTREL_BASE_URL or KESTREL_API_KEY missing in env"
+        )
+
+    #  If token exists and not expired -> reuse
+    now = time.time()
+    if _kestrel_token_cache["token"] and now < _kestrel_token_cache["expires_at"]:
+        return _kestrel_token_cache["token"]
+
+    url = f"{KESTREL_BASE_URL.rstrip('/')}/generate-key"
+    payload = {"apiKey": KESTREL_API_KEY}
+
+    try:
+        resp = await _kestrel_client.post(url, json=payload)
+
+        if resp.status_code != 200:
+            log.error(f"Kestrel generate-key failed: {resp.status_code} | {resp.text}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Kestrel generate-key failed ({resp.status_code})"
+            )
+
+        data = resp.json()
+        encrypted_key = data.get("encryptedKey")
+
+        if not encrypted_key:
+            raise HTTPException(status_code=502, detail="Kestrel returned empty encryptedKey")
+
+        #  cache token for 25 minutes (adjust as per kestrel TTL)
+        _kestrel_token_cache["token"] = encrypted_key
+        _kestrel_token_cache["expires_at"] = now + (25 * 60)
+
+        return encrypted_key
+
+    except httpx.RequestError as e:
+        log.error(f"Kestrel connection error (generate-key): {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail="Unable to connect to Kestrel")
+
+    except Exception as e:
+        log.error(f"Unexpected error in get_kestrel_token: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/kestrel/employee-list", summary="Fetch Employee List from Kestrel")
+async def kestrel_employee_list(
+    page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1, le=1000),
+    search: str = Query("", description="Search by name, email, or employee code"),
+    sortBy: str = Query("name", description="Supported: name, email, employeeCode, teamName"),
+    sortOrder: str = Query("ASC", description="Supported: ASC or DESC"),
+):
+    """
+    Proxy endpoint:
+    Frontend calls this.
+    Backend fetches token from Kestrel (cached) and returns employee list.
+    """
+
+    #  Validate inputs before calling kestrel
+    if sortBy not in SUPPORTED_SORT_BY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid sortBy. Supported: {list(SUPPORTED_SORT_BY)}"
+        )
+
+    sortOrder = sortOrder.upper()
+    if sortOrder not in SUPPORTED_SORT_ORDER:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid sortOrder. Supported: {list(SUPPORTED_SORT_ORDER)}"
+        )
+
+    token = await get_kestrel_token()
+    url = f"{KESTREL_BASE_URL.rstrip('/')}/employee-list"
+
+    params = {
+        "page": page,
+        "limit": limit,
+        "search": search,
+        "sortBy": sortBy,
+        "sortOrder": sortOrder,
+    }
+
+    headers = {"Authorization": token}
+
+    try:
+        resp = await _kestrel_client.get(url, params=params, headers=headers)
+
+        #  if unauthorized - refresh token and retry once
+        if resp.status_code == 401:
+            _kestrel_token_cache["token"] = None
+            _kestrel_token_cache["expires_at"] = 0
+
+            token = await get_kestrel_token()
+            headers = {"Authorization": token}
+            resp = await _kestrel_client.get(url, params=params, headers=headers)
+
+        if resp.status_code != 200:
+            log.error(f"Kestrel employee-list failed: {resp.status_code} | {resp.text}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Kestrel employee-list failed ({resp.status_code})"
+            )
+
+        return resp.json()
+
+    except httpx.RequestError as e:
+        log.error(f"Kestrel connection error (employee-list): {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail="Unable to connect to Kestrel")
+
+    except Exception as e:
+        log.error(f"Unexpected error in kestrel_employee_list: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/kestrel/sync-employees", summary="Sync Kestrel Employees with DB")
+async def sync_kestrel_employees(
+    request: Request,
+    page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1, le=1000),
+    db: Session = Depends(get_db),
+):
+    """
+    Frontend refresh trigger hits this API.
+    It syncs Kestrel employees (page+limit) with your local Employee table.
+    """
+    return await sync_kestrel_employees_service(db=db, page=page, limit=limit)
+

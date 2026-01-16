@@ -111,3 +111,12 @@ if __name__ == "__main__":
         reload=True,
         log_config=None  # Use your custom logging configuration
     )
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    client = globals().get("_kestrel_client")
+    if client is not None:
+        try:
+            await client.aclose()
+        except Exception as e:
+            log.warning(f"Failed to close _kestrel_client: {e}")
