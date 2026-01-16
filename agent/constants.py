@@ -18,6 +18,7 @@ QUIZ_RENDERER_PROMPT = """
   "mcq": "If the question contains predefined options (A/B/C/D) or a fixed list of choices.",
   "open-text": "If the question is open-ended and requires a descriptive or explanatory answer.",
   "rating": "If the question asks the respondent to rate proficiency, satisfaction, or experience on a numerical scale.",
+  "yesno": "If the question is a binary yes/no question that requires a simple yes or no answer.",
   "plus/mminus": "If the question is a statement that can be answered with plus or minus or plus minus.",
   "default": "open-text"
 },
@@ -57,12 +58,21 @@ QUIZ_RENDERER_PROMPT = """
       "options": ["+", "-", "+-",],
       "category": "<inferred_category>"
     },
+    {
+      "id": 5,
+      "text": "<question_text>",
+      "type": "yesno",
+      "order": 3,
+      "options": null,
+      "category": "<inferred_category>"
+    },
   ],
   "important_notes": [
     "Use sequential numbering starting from '0' for the 'id' field.",
     "The 'order' field should also be sequential, starting from '1'.",
-    "The 'options' field is only used for 'mcq' and 'rating' types. For 'open-text', 'tf', and 'plusminus', it must be null.",
-    "The 'category' field must be inferred based on the question's content (e.g., 'Time Management', 'Tools', 'Decision Making')."
+    "The 'options' field is only used for 'mcq' and 'rating' types. For 'open-text', 'tf', 'plusminus', and 'yesno', it must be null.",
+    "The 'category' field must be inferred based on the question's content (e.g., 'Time Management', 'Tools', 'Decision Making').",
+    "For 'yesno' type questions, the system will automatically convert Yes to + and No to - for scoring."
   ]
 }
 

@@ -453,10 +453,13 @@ async def submit_quiz_endpoint(
     if mode in ['people_analyzer', 'people-analyzer']:
         # Check for duplicate submission: same reviewer reviewing the same employee
         if payload.user_id and payload.employee_id:
+            user_uuid = uuid.UUID(payload.user_id) if isinstance(payload.user_id, str) else payload.user_id
+            employee_uuid = uuid.UUID(payload.employee_id) if isinstance(payload.employee_id, str) else payload.employee_id
+            
             existing_review = db.query(PeopleAnalyzer).filter(
                 PeopleAnalyzer.chatbot_id == uuid.UUID(payload.chatbot_id),
-                PeopleAnalyzer.created_by == payload.user_id,
-                PeopleAnalyzer.employee_id == payload.employee_id
+                PeopleAnalyzer.created_by == user_uuid,
+                PeopleAnalyzer.employee_id == employee_uuid
             ).first()
             
             if existing_review:
@@ -469,15 +472,16 @@ async def submit_quiz_endpoint(
             id=uuid.uuid4(),
             chatbot_id=uuid.UUID(payload.chatbot_id),
             answers=payload.answers,
-            created_by=payload.user_id,
-            employee_id=payload.employee_id
+            created_by=uuid.UUID(payload.user_id) if payload.user_id else None,
+            employee_id=uuid.UUID(payload.employee_id) if payload.employee_id else None
         )
     else:
         # Check for duplicate submission: same employee submitting for the same quiz/chatbot
         if payload.user_id:
+            user_uuid = uuid.UUID(payload.user_id) if isinstance(payload.user_id, str) else payload.user_id
             existing_answer = db.query(Answer).filter(
                 Answer.chatbot_id == uuid.UUID(payload.chatbot_id),
-                Answer.attempter_by_id == payload.user_id
+                Answer.attempter_by_id == user_uuid
             ).first()
             
             if existing_answer:
@@ -490,7 +494,7 @@ async def submit_quiz_endpoint(
             id=uuid.uuid4(),
             chatbot_id=uuid.UUID(payload.chatbot_id),
             answer_data=payload.answers,
-            attempter_by_id=payload.user_id,
+            attempter_by_id=uuid.UUID(payload.user_id) if payload.user_id else None,
             chat_history=[]
         )
     

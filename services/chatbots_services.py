@@ -739,62 +739,77 @@ def get_people_analyzer_responses(
         "aggregated_data": aggregated_data
     }
 
+# people analyzer response evaluation service
 
 def get_employee_evaluation_service(
     chatbot_id: uuid.UUID,
     db: Session
 ) -> List[Dict[str, Any]]:
     """
-    Get all employee evaluation data for people_analyzer by chatbot_id only.
-    Returns evaluations in strict schema format as specified.
+    Reviewer-wise evaluations (flat list).
+    Each item contains:
+      - reviewer (who reviewed)
+      - reviewed_employee (who got reviewed)
+      - answers (stored JSON)
+    Entries are ordered so the same reviewer appears together.
     """
-    
+
     chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
     if not chatbot:
         raise HTTPException(status_code=404, detail="Chatbot not found")
-    
+
     if chatbot.mode != "people_analyzer":
-        raise HTTPException(status_code=400, detail="This endpoint is only for people_analyzer mode")
-    
-    # Fetch all employee ratings for this chatbot with employee names
-    RatedEmployee = aliased(Employee)
-    RaterEmployee = aliased(Employee)
-    
+        raise HTTPException(
+            status_code=400,
+            detail="This endpoint is only for people_analyzer mode"
+        )
+
+    ReviewedEmployee = aliased(Employee)
+    ReviewerEmployee = aliased(Employee)
+
     query = db.query(
         PeopleAnalyzer,
-        RatedEmployee.employee_name.label('rated_employee_name'),
-        RaterEmployee.employee_name.label('rater_name')
-    )\
-        .outerjoin(RatedEmployee, PeopleAnalyzer.employee_id == RatedEmployee.id)\
-        .outerjoin(RaterEmployee, PeopleAnalyzer.created_by == RaterEmployee.id)\
-        .filter(PeopleAnalyzer.chatbot_id == chatbot_id)\
-        .order_by(PeopleAnalyzer.created_at.desc())
+        ReviewedEmployee.employee_name.label("reviewed_employee_name"),
+        ReviewerEmployee.employee_name.label("reviewer_name"),
+        ReviewedEmployee.id.label("reviewed_employee_id"),
+        ReviewerEmployee.id.label("reviewer_id"),
+    ) \
+        .outerjoin(ReviewedEmployee, PeopleAnalyzer.employee_id == ReviewedEmployee.id) \
+        .outerjoin(ReviewerEmployee, PeopleAnalyzer.created_by == ReviewerEmployee.id) \
+        .filter(PeopleAnalyzer.chatbot_id == chatbot_id) \
+        .order_by(
+            ReviewerEmployee.employee_name.asc(),   # ✅ group reviewer together
+            PeopleAnalyzer.created_at.desc()        # ✅ newest reviews first inside reviewer
+        )
 
     entries = query.all()
-
     if not entries:
         return []
 
-    # Build evaluations in exact schema format
-    evaluations = []
-    
-    for entry, rated_employee_name, rater_name in entries:
-        evaluation = {
+    evaluations: List[Dict[str, Any]] = []
+
+    for entry, reviewed_employee_name, reviewer_name, reviewed_employee_id, reviewer_id in entries:
+        evaluations.append({
             "id": str(entry.id),
-            "chatbot_id": str(entry.chatbot_id) if entry.chatbot_id else None,
-            "employee": {
-                "id": str(entry.employee_id) if entry.employee_id else None,
-                "name": rated_employee_name if entry.employee_id else None
+
+            # ✅ person who reviewed
+            "reviewer": {
+                "id": str(reviewer_id) if reviewer_id else None,
+                "name": reviewer_name if reviewer_id else None
             },
+
+            # ✅ person who got reviewed
+            "reviewed_employee": {
+                "id": str(reviewed_employee_id) if reviewed_employee_id else None,
+                "name": reviewed_employee_name if reviewed_employee_id else None
+            },
+
+            # ✅ answers JSON (exact as stored)
             "answers": entry.answers or {},
-            "created_by": {
-                "id": str(entry.created_by) if entry.created_by else None,
-                "name": rater_name if entry.created_by else None
-            },
+
             "created_at": entry.created_at.isoformat() if entry.created_at else None,
             "updated_at": entry.updated_at.isoformat() if entry.updated_at else None
-        }
-        evaluations.append(evaluation)
+        })
 
     return evaluations
     
