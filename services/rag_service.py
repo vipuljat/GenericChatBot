@@ -21,9 +21,9 @@ genai.configure(api_key=config.GEMINI_API_KEY)
 def retrieve_context(
     chatbot_name: str,
     query: str,
-    top_k: int = 20,  # Increased for better coverage
-    min_score: float = 0.4,  # Lowered to retrieve more potentially relevant chunks
-    max_context_chars: int = 6000,  # Increased to allow more context
+    top_k: int = 15,  # Increased for better coverage
+    min_score: float = 0.65,  # Lowered to retrieve more potentially relevant chunks
+    max_context_chars: int = 3500,  # Increased to allow more context
     document_type: Optional[str] = None
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """

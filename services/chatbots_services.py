@@ -11,7 +11,8 @@ from stateful_services.database import get_db
 from stateful_services.db_schema import Answer, Chatbot, ChatbotAccess, ChatbotPermission, Employee, PeopleAnalyzer, Question
 from utils.document_service import extract_text_from_document, get_file_extension
 from utils.logging import log
-
+import os
+import httpx
 # Import functional services
 from utils.embedding import process_document_for_embedding
 from services.vectore_store_service import (
@@ -89,7 +90,7 @@ def process_documents_background(
             try:
                 log.info(f"Processing: {doc_name}")
                 
-                # Extract text
+                # Extract text / parsing step
                 text = extract_text_from_document(doc_content, doc_name)
                 
                 if not text or not text.strip():
@@ -242,8 +243,15 @@ def create_chatbot(
         
         if access_list and mode == "people_analyzer":
             for entry in access_list:
-                employee_id = entry.get("employee_id")
-                allowed_to_review = entry.get("allowed_users", [])
+                # Handle both string (employee_id) and dict formats
+                if isinstance(entry, str):
+                    employee_id = entry
+                    allowed_to_review = []
+                elif isinstance(entry, dict):
+                    employee_id = entry.get("employee_id") or entry.get("reviewer_id")
+                    allowed_to_review = entry.get("allowed_users", [])
+                else:
+                    continue
 
                 if not employee_id:
                     continue
@@ -289,6 +297,7 @@ def update_chatbot(
     mode: Optional[str] = None,
     doc_contents: Optional[List[bytes]] = None,
     doc_names: Optional[List[str]] = None,
+    deleted_documents: Optional[List[str]] = None,
     questions: Optional[dict] = None,
     employee_ids: Optional[List[str]] = None,
     access_list: Optional[List[Dict[str, Any]]] = None,
@@ -715,165 +724,288 @@ def get_people_analyzer_responses(
     # Sort by overall_average descending (highest rated first)
     aggregated_data.sort(key=lambda x: x["overall_average"], reverse=True)
 
+    # Calculate team overall average
+    team_overall_average = 0
+    if aggregated_data:
+        total_sum = sum(emp["overall_average"] for emp in aggregated_data)
+        team_overall_average = round(total_sum / len(aggregated_data), 2)
+
     return {
         "mode": "people_analyzer",
         "chatbot_id": str(chatbot_id),
         "questions": questions,
         "filters_applied": {"department": department},
+        "team_overall_average": team_overall_average,
         "aggregated_data": aggregated_data
     }
 
+# people analyzer response evaluation service
 
 def get_employee_evaluation_service(
     chatbot_id: uuid.UUID,
     db: Session
-) -> Dict[str, Any]:
-    """Get all employee evaluation data for people_analyzer by chatbot_id only."""
-    
+) -> List[Dict[str, Any]]:
+    """
+    Reviewer-wise evaluations (flat list).
+    Each item contains:
+      - reviewer (who reviewed)
+      - reviewed_employee (who got reviewed)
+      - answers (stored JSON)
+    Entries are ordered so the same reviewer appears together.
+    """
+
     chatbot = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
     if not chatbot:
         raise HTTPException(status_code=404, detail="Chatbot not found")
-    
+
     if chatbot.mode != "people_analyzer":
-        raise HTTPException(status_code=400, detail="This endpoint is only for people_analyzer mode")
-    
-    # Fetch questions
-    questions_raw = db.query(Question)\
-        .filter(Question.chatbot_id == chatbot_id, Question.status == "active")\
-        .all()
+        raise HTTPException(
+            status_code=400,
+            detail="This endpoint is only for people_analyzer mode"
+        )
 
-    questions = []
-    for q in questions_raw:
-        data_list = q.question_data
-        if isinstance(data_list, list):
-            for item in data_list:
-                questions.append({
-                    "id": item.get("id"),
-                    "text": item.get("text"),
-                    "category": item.get("category"),
-                    "order": item.get("order", 999)
-                })
-        else:
-            questions.append({
-                "id": data_list.get("id"),
-                "text": data_list.get("text"),
-                "category": data_list.get("category"),
-                "order": data_list.get("order", 999)
-            })
+    ReviewedEmployee = aliased(Employee)
+    ReviewerEmployee = aliased(Employee)
 
-    questions.sort(key=lambda x: x.get("order", 999))
-
-    # Fetch all employee ratings for this chatbot
-    RatedEmployee = aliased(Employee)
-    RaterEmployee = aliased(Employee)
-    
     query = db.query(
         PeopleAnalyzer,
-        RatedEmployee.employee_name.label('rated_employee_name'),
-        RatedEmployee.employee_id.label('rated_employee_id'),
-        RatedEmployee.employee_email.label('rated_employee_email'),
-        RatedEmployee.department.label('rated_employee_department'),
-        RaterEmployee.employee_name.label('rater_name'),
-        RaterEmployee.employee_id.label('rater_employee_id')
-    )\
-        .join(RatedEmployee, PeopleAnalyzer.employee_id == RatedEmployee.id)\
-        .outerjoin(RaterEmployee, PeopleAnalyzer.created_by == RaterEmployee.id)\
-        .filter(PeopleAnalyzer.chatbot_id == chatbot_id)
+        ReviewedEmployee.employee_name.label("reviewed_employee_name"),
+        ReviewerEmployee.employee_name.label("reviewer_name"),
+        ReviewedEmployee.id.label("reviewed_employee_id"),
+        ReviewerEmployee.id.label("reviewer_id"),
+    ) \
+        .outerjoin(ReviewedEmployee, PeopleAnalyzer.employee_id == ReviewedEmployee.id) \
+        .outerjoin(ReviewerEmployee, PeopleAnalyzer.created_by == ReviewerEmployee.id) \
+        .filter(PeopleAnalyzer.chatbot_id == chatbot_id) \
+        .order_by(
+            ReviewerEmployee.employee_name.asc(),   # ✅ group reviewer together
+            PeopleAnalyzer.created_at.desc()        # ✅ newest reviews first inside reviewer
+        )
 
     entries = query.all()
-
     if not entries:
-        return {
-            "chatbot_id": str(chatbot_id),
-            "chatbot_name": chatbot.chatbot_name,
-            "mode": "people_analyzer",
-            "total_evaluations": 0,
-            "evaluations": [],
-            "questions": questions
-        }
+        return []
 
-    # Group by rated employee
-    employee_data = {}
-    
-    for entry, rated_employee_name, rated_employee_id, rated_employee_email, rated_employee_department, rater_name, rater_employee_id in entries:
-        emp_id = entry.employee_id
-        
-        if emp_id not in employee_data:
-            employee_data[emp_id] = {
-                "employee_id": str(emp_id),
-                "employee_name": rated_employee_name or "Unknown",
-                "employee_email": rated_employee_email or "Unknown",
-                "employee_code": rated_employee_id or "Unknown",
-                "department": rated_employee_department or "Unknown",
-                "total_ratings_received": 0,
-                "question_stats": {},
-                "total_sum": 0,
-                "total_count": 0,
-                "reviews": []
-            }
+    evaluations: List[Dict[str, Any]] = []
 
-        # Store individual review details
-        review_detail = {
-            "review_id": str(entry.id),
-            "reviewer_id": str(entry.created_by) if entry.created_by else None,
-            "reviewer_name": rater_name or "Anonymous",
-            "reviewer_employee_id": rater_employee_id or "Unknown",
-            "answers": entry.answers or {},
-            "created_at": entry.created_at.isoformat() if entry.created_at else None
-        }
-        employee_data[emp_id]["reviews"].append(review_detail)
-        employee_data[emp_id]["total_ratings_received"] += 1
-
-        # Process answers for statistics
-        answers = entry.answers or {}
-        for q_id_str, ans_obj in answers.items():
-            answer = ans_obj.get("answer") if isinstance(ans_obj, dict) else ans_obj
-            if answer == "skipped" or answer is None:
-                continue
-
-            if q_id_str not in employee_data[emp_id]["question_stats"]:
-                employee_data[emp_id]["question_stats"][q_id_str] = {"sum": 0, "count": 0}
-
-            score = {"+": 4, "-": 0, "+-": 2, "±": 2}.get(str(answer).strip(), 0)
-            employee_data[emp_id]["question_stats"][q_id_str]["sum"] += score
-            employee_data[emp_id]["question_stats"][q_id_str]["count"] += 1
-
-            employee_data[emp_id]["total_sum"] += score
-            employee_data[emp_id]["total_count"] += 1
-
-    # Calculate averages and format output
-    evaluations = []
-    for emp_id, data in employee_data.items():
-        question_averages = {}
-        for q_id, stats in data["question_stats"].items():
-            avg = stats["sum"] / stats["count"] if stats["count"] > 0 else 0
-            question_averages[q_id] = {
-                "average": round(avg, 2),
-                "count": stats["count"]
-            }
-
-        overall_average = round(data["total_sum"] / data["total_count"], 2) if data["total_count"] > 0 else 0
-
+    for entry, reviewed_employee_name, reviewer_name, reviewed_employee_id, reviewer_id in entries:
         evaluations.append({
-            "employee_id": data["employee_id"],
-            "employee_name": data["employee_name"],
-            "employee_email": data["employee_email"],
-            "employee_code": data["employee_code"],
-            "department": data["department"],
-            "total_ratings_received": data["total_ratings_received"],
-            "overall_average": overall_average,
-            "question_averages": question_averages,
-            "reviews": data["reviews"]
+            "id": str(entry.id),
+
+            # ✅ person who reviewed
+            "reviewer": {
+                "id": str(reviewer_id) if reviewer_id else None,
+                "name": reviewer_name if reviewer_id else None
+            },
+
+            # ✅ person who got reviewed
+            "reviewed_employee": {
+                "id": str(reviewed_employee_id) if reviewed_employee_id else None,
+                "name": reviewed_employee_name if reviewed_employee_id else None
+            },
+
+            # ✅ answers JSON (exact as stored)
+            "answers": entry.answers or {},
+
+            "created_at": entry.created_at.isoformat() if entry.created_at else None,
+            "updated_at": entry.updated_at.isoformat() if entry.updated_at else None
         })
 
-    # Sort by overall_average descending
-    evaluations.sort(key=lambda x: x["overall_average"], reverse=True)
+    return evaluations
+    
+    
+# ===================================================================
+# KESTREL EMPLOYEE SYNC SERVICE
+# ===================================================================
 
-    return {
-        "chatbot_id": str(chatbot_id),
-        "chatbot_name": chatbot.chatbot_name,
-        "mode": "people_analyzer",
-        "total_evaluations": len(evaluations),
-        "evaluations": evaluations,
-        "questions": questions
-    }
+async def sync_kestrel_employees_service(db: Session, page: int = 1, limit: int = 10):
+    """
+    ✅ Uses Kestrel credentials from ENV:
+    - KESTREL_BASE_URL
+    - KESTREL_API_KEY
+
+    ✅ Sync Logic:
+    1) Call Kestrel generate-key API and get token
+    2) Call Kestrel employee-list API using page & limit
+    3) Compare with local Employee table using employee_code OR employee_email
+    4) If exists → update fields (employee_name, employee_email, department)
+    5) If not exists → create new employee
+    """
+
+    KESTREL_BASE_URL = os.getenv("KESTREL_BASE_URL")
+    KESTREL_API_KEY = os.getenv("KESTREL_API_KEY")
+
+    if not KESTREL_BASE_URL or not KESTREL_API_KEY:
+        raise HTTPException(status_code=500, detail="KESTREL_BASE_URL or KESTREL_API_KEY missing in ENV")
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            # ============================================================================
+            # ✅ Step 1: Generate token from Kestrel
+            # ============================================================================
+            generate_key_url = f"{KESTREL_BASE_URL.rstrip('/')}/generate-key"
+            key_resp = await client.post(generate_key_url, json={"apiKey": KESTREL_API_KEY})
+
+            if key_resp.status_code != 200:
+                log.error(f"Kestrel generate-key failed: {key_resp.status_code} | {key_resp.text}")
+                raise HTTPException(status_code=502, detail="Kestrel generate-key failed")
+
+            token = key_resp.json().get("encryptedKey")
+            if not token:
+                raise HTTPException(status_code=502, detail="Kestrel did not return encryptedKey")
+
+            headers = {"Authorization": token}
+
+            # ============================================================================
+            # ✅ Step 2: Fetch employee list from Kestrel using page + limit
+            # ============================================================================
+            kestrel_url = f"{KESTREL_BASE_URL.rstrip('/')}/employee-list"
+            kestrel_params = {
+                "page": page,
+                "limit": limit,
+                "search": "",
+                "sortBy": "name",
+                "sortOrder": "ASC",
+            }
+
+            resp = await client.get(kestrel_url, params=kestrel_params, headers=headers)
+
+            if resp.status_code != 200:
+                log.error(f"Kestrel employee-list failed: {resp.status_code} | {resp.text}")
+                raise HTTPException(status_code=502, detail="Kestrel employee-list failed")
+
+            kestrel_data = resp.json()
+            kestrel_all_employees = kestrel_data.get("data", [])
+
+        # ============================================================================
+        # ✅ Step 3: Compare with local DB employees
+        # ============================================================================
+        db_employees = db.query(Employee).all()
+        db_code_map = {emp.employee_code: emp for emp in db_employees if emp.employee_code}
+        db_email_map = {emp.employee_email: emp for emp in db_employees if emp.employee_email}
+
+        added_employees = []
+        updated_employees = []
+
+        added_count = 0
+        updated_count = 0
+        skipped_count = 0
+
+        # ============================================================================
+        # ✅ Step 4 & 5: Update existing / Insert missing
+        # ============================================================================
+        for k_emp in kestrel_all_employees:
+            kestrel_code = k_emp.get("employeeCode")
+            kestrel_email = k_emp.get("email")
+            kestrel_name = k_emp.get("name")
+            kestrel_team = k_emp.get("teamName")
+
+            if not kestrel_code and not kestrel_email:
+                skipped_count += 1
+                continue
+
+            existing = None
+
+            # match by code first
+            if kestrel_code and kestrel_code in db_code_map:
+                existing = db_code_map[kestrel_code]
+            # else match by email
+            elif kestrel_email and kestrel_email in db_email_map:
+                existing = db_email_map[kestrel_email]
+
+            # ✅ Step 4: update
+            if existing:
+                changed = False
+
+                if existing.employee_name != kestrel_name:
+                    existing.employee_name = kestrel_name
+                    changed = True
+
+                # update email but prevent duplicate conflict
+                if kestrel_email and existing.employee_email != kestrel_email:
+                    other = db_email_map.get(kestrel_email)
+                    if other and other.id != existing.id:
+                        log.warning(f"Skipping email update due to duplicate email: {kestrel_email}")
+                    else:
+                        existing.employee_email = kestrel_email
+                        changed = True
+
+                if existing.department != kestrel_team:
+                    existing.department = kestrel_team
+                    changed = True
+
+                # fill code once if missing
+                if (not existing.employee_code) and kestrel_code:
+                    existing.employee_code = kestrel_code
+                    db_code_map[kestrel_code] = existing
+                    changed = True
+
+                if changed:
+                    updated_count += 1
+                    updated_employees.append({
+                        "employee_code": existing.employee_code,
+                        "employee_name": existing.employee_name,
+                        "employee_email": existing.employee_email,
+                        "department": existing.department
+                    })
+                else:
+                    skipped_count += 1
+
+            # ✅ Step 5: insert
+            else:
+                # prevent insert if email exists
+                if kestrel_email and kestrel_email in db_email_map:
+                    skipped_count += 1
+                    continue
+
+                new_emp = Employee(
+                    id=uuid.uuid4(),
+                    employee_id=str(uuid.uuid4()),
+                    employee_name=kestrel_name or "Unknown",
+                    employee_email=kestrel_email,
+                    employee_code=kestrel_code,
+                    employee_role="employee",
+                    department=kestrel_team
+                )
+                db.add(new_emp)
+
+                added_count += 1
+                added_employees.append({
+                    "employee_code": kestrel_code,
+                    "employee_name": kestrel_name,
+                    "employee_email": kestrel_email,
+                    "department": kestrel_team
+                })
+
+                if kestrel_code:
+                    db_code_map[kestrel_code] = new_emp
+                if kestrel_email:
+                    db_email_map[kestrel_email] = new_emp
+
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "Kestrel employee sync completed successfully",
+            "page": page,
+            "limit": limit,
+            "total_kestrel_employees_received": len(kestrel_all_employees),
+
+            "added_count": added_count,
+            "updated_count": updated_count,
+            "skipped_count": skipped_count,
+
+            "added_employees": added_employees,
+            "updated_employees": updated_employees,
+        }
+
+    except httpx.RequestError as e:
+        log.error(f"Kestrel connection error: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail="Unable to connect to Kestrel server")
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        log.error(f"Unexpected error in sync_kestrel_employees_service: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")

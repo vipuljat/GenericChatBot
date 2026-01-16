@@ -61,6 +61,10 @@ def detect_user_intent(user_message: str, chatbot_mode: str = "quiz") -> str:
         if any(phrase in msg_lower for phrase in next_phrases):
             return "navigate_next"
         
+        # Direct question number navigation (e.g., "Question 1", "question 5")
+        if re.match(r'^question\s+\d+$', msg_lower):
+            return "navigate_direct"
+        
         # End quiz detection
         end_phrases = ['end quiz', 'finish quiz', 'stop quiz', 'submit quiz', 'i am done', "i'm done", 'submit']
         if any(phrase in msg_lower for phrase in end_phrases):
@@ -362,7 +366,6 @@ Keep your response concise (2-3 sentences max).
             }
         }
 
-
 def handle_quiz_completion(
     db: Session,
     chatbot_id: str,
@@ -375,19 +378,18 @@ def handle_quiz_completion(
 ) -> Dict[str, Any]:
     """
     Handle quiz completion - save answers to appropriate table.
-    
-    Args:
-        chatbot_mode: "quiz" or "people_analyzer"
-        employee_id: For people_analyzer mode - person being analyzed
+
+    NOTE:
+    - If an entry already exists, return early and DO NOT create a new entry.
     """
     try:
         quiz_state["completed"] = True
-        
+
         # Mark unanswered questions as "skipped"
         for idx in range(len(questions)):
             if str(idx) not in quiz_state["answers"]:
                 quiz_state["answers"][str(idx)] = {"answer": "skipped"}
-        
+
         # Convert index-based answers to question ID-based answers
         id_based_answers = {}
         for idx_str, ans_data in quiz_state["answers"].items():
@@ -395,37 +397,92 @@ def handle_quiz_completion(
             if idx < len(questions):
                 question_id = str(questions[idx]["id"])  # Convert to string for consistency
                 id_based_answers[question_id] = ans_data
-        
+
         # Prepare answer data
         answer_data = {
-            "answers": id_based_answers,  # Use ID-based answers instead of index-based
+            "answers": id_based_answers,
             "attempted": quiz_state["attempted"],
             "skipped": quiz_state["skipped"],
             "total_questions": len(questions),
             "completion_time": datetime.utcnow().isoformat()
         }
-       
+
+        chatbot_uuid = uuid.UUID(chatbot_id)
+
         # Save based on mode
         if chatbot_mode == "people_analyzer":
-            # Save to people_analyzer table
+            # ✅ CHECK IF ENTRY EXISTS
+            existing = (
+                db.query(PeopleAnalyzer)
+                .filter(
+                    PeopleAnalyzer.chatbot_id == chatbot_uuid,
+                    PeopleAnalyzer.employee_id == employee_id,
+                    PeopleAnalyzer.created_by == user_id
+                )
+                .first()
+            )
+
+            if existing:
+                log.info(f"✓ People analyzer entry already exists: {existing.id}")
+                return {
+                    "response": "✅ Assessment already submitted. No new entry was created.",
+                    "quiz_state": quiz_state,
+                    "metadata": {
+                        "completed": True,
+                        "already_exists": True,
+                        "record_id": str(existing.id),
+                        "total_questions": len(questions),
+                        "answered": len(quiz_state["attempted"]),
+                        "skipped": len(quiz_state["skipped"])
+                    }
+                }
+
+            # ✅ CREATE NEW ENTRY (only if not exists)
             new_record = PeopleAnalyzer(
                 id=uuid.uuid4(),
-                chatbot_id=uuid.UUID(chatbot_id),
-                employee_id=employee_id,  # Person being analyzed
-                answers=id_based_answers,  # Save the ID-based answers directly
-                created_by=user_id  # Person who filled it
+                chatbot_id=chatbot_uuid,
+                employee_id=employee_id,
+                answers=id_based_answers,
+                created_by=user_id
             )
             db.add(new_record)
             db.commit()
             db.refresh(new_record)
-            
+
             log.info(f"✓ People analyzer completed and saved: {new_record.id}")
             response = "✅ Assessment completed! Your ratings have been submitted successfully. Thank you!"
+            record = new_record
+
         else:
-            # Save to Answer table (regular quiz)
+            # ✅ CHECK IF ENTRY EXISTS
+            existing = (
+                db.query(Answer)
+                .filter(
+                    Answer.chatbot_id == chatbot_uuid,
+                    Answer.attempter_by_id == user_id
+                )
+                .first()
+            )
+
+            if existing:
+                log.info(f"✓ Quiz entry already exists: {existing.id}")
+                return {
+                    "response": "✅ Quiz already submitted. No new entry was created.",
+                    "quiz_state": quiz_state,
+                    "metadata": {
+                        "completed": True,
+                        "already_exists": True,
+                        "record_id": str(existing.id),
+                        "total_questions": len(questions),
+                        "answered": len(quiz_state["attempted"]),
+                        "skipped": len(quiz_state["skipped"])
+                    }
+                }
+
+            # ✅ CREATE NEW ENTRY (only if not exists)
             new_record = Answer(
                 id=uuid.uuid4(),
-                chatbot_id=uuid.UUID(chatbot_id),
+                chatbot_id=chatbot_uuid,
                 answer_data=answer_data.get("answers", []),
                 attempter_by_id=user_id,
                 chat_history=conversation_history or []
@@ -433,22 +490,24 @@ def handle_quiz_completion(
             db.add(new_record)
             db.commit()
             db.refresh(new_record)
-            
+
             log.info(f"✓ Quiz completed and saved: {new_record.id}")
             response = "✅ Quiz completed! Your answers have been submitted successfully. Thank you!"
-        
+            record = new_record
+
         return {
             "response": response,
             "quiz_state": quiz_state,
             "metadata": {
                 "completed": True,
-                "record_id": str(new_record.id),
+                "already_exists": False,
+                "record_id": str(record.id),
                 "total_questions": len(questions),
                 "answered": len(quiz_state["attempted"]),
                 "skipped": len(quiz_state["skipped"])
             }
         }
-        
+
     except Exception as e:
         log.error(f"❌ Completion failed: {e}", exc_info=True)
         db.rollback()
@@ -457,7 +516,6 @@ def handle_quiz_completion(
             "quiz_state": quiz_state,
             "error": str(e)
         }
-
 
 # ============================================================================
 # MAIN QUIZ SERVICE FUNCTION
@@ -574,6 +632,40 @@ def quiz_query_service(
         if intent == "navigate_next":
             return handle_navigation("next", questions, quiz_state)
         
+        # Handle direct question navigation (e.g., "Question 1", "Question 5")
+        if intent == "navigate_direct":
+            match = re.match(r'question\s+(\d+)', query.lower())
+            if match:
+                question_num = int(match.group(1))
+                target_index = question_num - 1  # Convert to 0-based index
+                
+                if 0 <= target_index < len(questions):
+                    quiz_state["current_index"] = target_index
+                    target_question = questions[target_index]
+                    formatted_q = format_question_for_display(
+                        target_question,
+                        target_index,
+                        len(questions)
+                    )
+                    
+                    return {
+                        "response": formatted_q,
+                        "quiz_state": quiz_state,
+                        "metadata": {
+                            "total_questions": len(questions),
+                            "current_question_index": target_index
+                        }
+                    }
+                else:
+                    return {
+                        "response": f"Invalid question number. Please choose between 1 and {len(questions)}.",
+                        "quiz_state": quiz_state,
+                        "metadata": {
+                            "total_questions": len(questions),
+                            "current_question_index": quiz_state["current_index"]
+                        }
+                    }
+        
         # Handle end quiz
         if intent == "end_quiz":
             return handle_quiz_completion(
@@ -666,7 +758,9 @@ def quiz_query_service(
                     "average": "+-",
                     "partial": "+-",
                     "partially": "+-",
-                    "neutral": "+-"
+                    "neutral": "+-",
+                    "yes": "+",
+                    "no": "-",
                 }
                 
                 query_lower = query.strip().lower()
