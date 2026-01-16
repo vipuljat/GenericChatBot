@@ -48,7 +48,7 @@ def detect_user_intent(user_message: str, chatbot_mode: str = "quiz") -> str:
                 return "answer"
         
         # Fast rule-based detection for obvious cases
-        greetings = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening']
+        greetings = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening', 'start']
         if any(msg_lower == greet or msg_lower.startswith(greet + ' ') for greet in greetings) and len(msg_lower) < 30:
             return "greeting"
         
