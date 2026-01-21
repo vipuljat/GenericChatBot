@@ -63,14 +63,15 @@ QUIZ_RENDERER_PROMPT = """
       "text": "<question_text>",
       "type": "yesno",
       "order": 3,
-      "options": null,
+      "options": ["Yes", "No"],
       "category": "<inferred_category>"
     },
   ],
   "important_notes": [
     "Use sequential numbering starting from '0' for the 'id' field.",
     "The 'order' field should also be sequential, starting from '1'.",
-    "The 'options' field is only used for 'mcq' and 'rating' types. For 'open-text', 'tf', 'plusminus', and 'yesno', it must be null.",
+    "The 'options' field is only used for 'mcq', 'rating', and 'yesno' types. For 'open-text', 'tf', and 'plusminus', it must be null.",
+    "For 'yesno' type, options must be ['Yes', 'No'].",
     "The 'category' field must be inferred based on the question's content (e.g., 'Time Management', 'Tools', 'Decision Making').",
     "For 'yesno' type questions, the system will automatically convert Yes to + and No to - for scoring."
   ]

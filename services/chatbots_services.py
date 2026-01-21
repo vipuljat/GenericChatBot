@@ -773,6 +773,7 @@ def get_employee_evaluation_service(
         ReviewerEmployee.employee_name.label("reviewer_name"),
         ReviewedEmployee.id.label("reviewed_employee_id"),
         ReviewerEmployee.id.label("reviewer_id"),
+        ReviewedEmployee.department.label("reviewed_employee_department"),
     ) \
         .outerjoin(ReviewedEmployee, PeopleAnalyzer.employee_id == ReviewedEmployee.id) \
         .outerjoin(ReviewerEmployee, PeopleAnalyzer.created_by == ReviewerEmployee.id) \
@@ -788,7 +789,7 @@ def get_employee_evaluation_service(
 
     evaluations: List[Dict[str, Any]] = []
 
-    for entry, reviewed_employee_name, reviewer_name, reviewed_employee_id, reviewer_id in entries:
+    for entry, reviewed_employee_name, reviewer_name, reviewed_employee_id, reviewer_id, reviewed_employee_department in entries:
         evaluations.append({
             "id": str(entry.id),
 
@@ -803,6 +804,8 @@ def get_employee_evaluation_service(
                 "id": str(reviewed_employee_id) if reviewed_employee_id else None,
                 "name": reviewed_employee_name if reviewed_employee_id else None
             },
+
+            "department": reviewed_employee_department or "N/A",
 
             # ✅ answers JSON (exact as stored)
             "answers": entry.answers or {},

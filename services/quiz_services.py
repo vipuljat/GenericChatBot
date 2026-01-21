@@ -46,6 +46,8 @@ def detect_user_intent(user_message: str, chatbot_mode: str = "quiz") -> str:
             # Accept typed words: positive, negative, average
             if msg_lower in ["positive", "negative", "average"]:
                 return "answer"
+             
+              
         
         # Fast rule-based detection for obvious cases
         greetings = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening', 'start']
