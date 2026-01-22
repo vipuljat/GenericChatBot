@@ -50,7 +50,7 @@ def detect_user_intent(user_message: str, chatbot_mode: str = "quiz") -> str:
               
         
         # Fast rule-based detection for obvious cases
-        greetings = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening', 'start']
+        greetings = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening',"start"]
         if any(msg_lower == greet or msg_lower.startswith(greet + ' ') for greet in greetings) and len(msg_lower) < 30:
             return "greeting"
         
@@ -89,10 +89,12 @@ Classify as ONE of these intents:
 4. "end_quiz" - User wants to end the quiz (e.g., "I'm done", "submit")
 5. "navigate_previous" - User wants to go to previous question (e.g., "previous question", "go back")
 6. "navigate_next" - User wants to move to next question (e.g., "next question")
+7. "start" - treat as greeting
+
 
 Respond with ONLY ONE WORD: clarification_question, skip, answer, end_quiz, navigate_previous, or navigate_next.
 
-NOTE: if user use +, _ or +-, it will be considered as answer.
+NOTE: if user use +, _ or +- 8. "Agree or Disagree, Partially Agree or agree disagree etc", it will be considered as answer.
 
 Examples:
 "explain" -> clarification_question
