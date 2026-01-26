@@ -46,6 +46,8 @@ def detect_user_intent(user_message: str, chatbot_mode: str = "quiz") -> str:
             # Accept typed words: positive, negative, average
             if msg_lower in ["positive", "negative", "average"]:
                 return "answer"
+             
+              
         
         # Fast rule-based detection for obvious cases
         greetings = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening',"start"]
@@ -390,17 +392,11 @@ def handle_quiz_completion(
             if str(idx) not in quiz_state["answers"]:
                 quiz_state["answers"][str(idx)] = {"answer": "skipped"}
 
-        # Convert index-based answers to question ID-based answers
-        id_based_answers = {}
-        for idx_str, ans_data in quiz_state["answers"].items():
-            idx = int(idx_str)
-            if idx < len(questions):
-                question_id = str(questions[idx]["id"])  # Convert to string for consistency
-                id_based_answers[question_id] = ans_data
+        
 
         # Prepare answer data
         answer_data = {
-            "answers": id_based_answers,
+            "answers": quiz_state["answers"],
             "attempted": quiz_state["attempted"],
             "skipped": quiz_state["skipped"],
             "total_questions": len(questions),
@@ -442,7 +438,7 @@ def handle_quiz_completion(
                 id=uuid.uuid4(),
                 chatbot_id=chatbot_uuid,
                 employee_id=employee_id,
-                answers=id_based_answers,
+                answers=answer_data.get("answers", []),
                 created_by=user_id
             )
             db.add(new_record)
@@ -694,7 +690,7 @@ def quiz_query_service(
             current_q_index = quiz_state["current_index"]
             
             # Record skipped answer
-            quiz_state["answers"][str(current_q_index)] = "skipped"
+            quiz_state["answers"][str(current_q_index)] = {"answer": "skipped"}
             if current_q_index not in quiz_state["skipped"]:
                 quiz_state["skipped"].append(current_q_index)
             

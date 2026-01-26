@@ -4,7 +4,6 @@ import json
 from fastapi import APIRouter, Depends, Request, UploadFile, File, Form, BackgroundTasks, HTTPException, Query, Body
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-
 from agent.agent import render_quiz_questions
 from stateful_services.database import get_db
 from stateful_services.db_schema import Chatbot, ChatbotAccess, PeopleAnalyzer, Question, Answer, Employee, ChatbotPermission

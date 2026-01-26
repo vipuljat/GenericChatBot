@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import uuid
 import json
 import urllib.parse
+from typing import Optional
 
 router = APIRouter()
 auth_service = MicrosoftAuthService()
@@ -28,8 +29,12 @@ async def login():
 
 
 @router.get("/callback")
-async def auth_callback(code: str = None, error: str = None, error_description: str = None, 
-                        db: Session = Depends(get_db)):
+async def auth_callback(
+    code: Optional[str] = None,
+    error: Optional[str] = None,
+    error_description: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
     """Handle OAuth callback from Microsoft"""
     
     # Handle OAuth errors

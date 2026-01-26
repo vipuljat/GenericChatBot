@@ -2,6 +2,7 @@ import uuid
 from typing import List, Optional, Dict, Any
 from fastapi.encoders import jsonable_encoder
 from fastapi.params import Depends
+
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, BackgroundTasks, Request
 from qdrant_client.models import PointStruct
@@ -493,6 +494,8 @@ def get_chatbot_responses_service(
         return get_quiz_responses(chatbot_id, db)
     elif chatbot.mode == "people_analyzer":
         return get_people_analyzer_responses(chatbot_id, department, db)
+    elif chatbot.mode == "general":
+        return get_general_chatbot_conversations(chatbot_id, db)
     else:
         raise HTTPException(status_code=400, detail="Unsupported chatbot mode")
 
@@ -505,7 +508,7 @@ def get_quiz_responses(chatbot_id: uuid.UUID, db: Session) -> Dict[str, Any]:
         .filter(Question.chatbot_id == chatbot_id, Question.status == "active")\
         .all()
 
-    # Build question map: id -> {text, options}
+    # Build question map: id -> {text, options, correct_answer}
     question_map = {}
     for q in questions_raw:
         data_list = q.question_data
@@ -516,7 +519,8 @@ def get_quiz_responses(chatbot_id: uuid.UUID, db: Session) -> Dict[str, Any]:
                     question_map[qid] = {
                         "text": item.get("text"),
                         "options": item.get("options", []),
-                        "type": item.get("type", "mcq")
+                        "type": item.get("type", "mcq"),
+                        "correct_answer": item.get("correct_answer")
                     }
 
     # Fetch attempts
@@ -553,13 +557,14 @@ def get_quiz_responses(chatbot_id: uuid.UUID, db: Session) -> Dict[str, Any]:
             answer_value = ans_obj.get("answer") if isinstance(ans_obj, dict) else ans_obj
             is_skipped = answer_value == "skipped" or (isinstance(ans_obj, dict) and ans_obj.get("answer") == "skipped")
 
-            question_info = question_map.get(q_id, {"text": f"Question {q_id}", "options": [], "type": "mcq"})
+            question_info = question_map.get(q_id, {"text": f"Question {q_id}", "options": [], "type": "mcq", "correct_answer": None})
 
             detailed_answers.append({
                 "question_id": q_id,
                 "question_text": question_info["text"],
                 "type": question_info["type"],
                 "options": question_info["options"],
+                "correct_answer": question_info.get("correct_answer"),
                 "selected_answer": "Skipped" if is_skipped else answer_value
             })
 
@@ -580,11 +585,81 @@ def get_quiz_responses(chatbot_id: uuid.UUID, db: Session) -> Dict[str, Any]:
             "created_at": attempt.created_at.isoformat()
         })
 
+    # Build questions list with correct answers for frontend
+    questions_list = []
+    for q in questions_raw:
+        data_list = q.question_data
+        if isinstance(data_list, list):
+            for item in data_list:
+                questions_list.append({
+                    "id": item.get("id"),
+                    "text": item.get("text"),
+                    "type": item.get("type", "mcq"),
+                    "options": item.get("options", []),
+                    "correct_answer": item.get("correct_answer")
+                })
+    
+    # Sort by id
+    questions_list.sort(key=lambda x: x.get("id", 0))
+
     return {
         "mode": "quiz",
         "chatbot_id": str(chatbot_id),
         "total_attempts": len(formatted_attempts),
+        "questions": questions_list,
         "attempts": formatted_attempts
+    }
+
+
+def get_general_chatbot_conversations(chatbot_id: uuid.UUID, db: Session) -> Dict[str, Any]:
+    """Get all chat conversations for general chatbot mode."""
+    
+    # Fetch all answers/conversations for this chatbot
+    conversations = db.query(Answer)\
+        .filter(Answer.chatbot_id == chatbot_id)\
+        .order_by(Answer.created_at.desc())\
+        .all()
+
+    if not conversations:
+        return {
+            "mode": "general",
+            "chatbot_id": str(chatbot_id),
+            "total_conversations": 0,
+            "conversations": []
+        }
+
+    formatted_conversations = []
+
+    for conv in conversations:
+        employee = db.query(Employee)\
+            .filter(Employee.id == conv.attempter_by_id)\
+            .first()
+
+        chat_history = conv.chat_history or []
+        
+        # Count messages
+        user_messages = sum(1 for msg in chat_history if msg.get('role') == 'user')
+        bot_messages = sum(1 for msg in chat_history if msg.get('role') == 'assistant')
+        
+        formatted_conversations.append({
+            "conversation_id": str(conv.id),
+            "employee_id": str(conv.attempter_by_id) if conv.attempter_by_id else None,
+            "employee_name": employee.employee_name if employee else "Unknown",
+            "employee_email": employee.employee_email if employee else None,
+            "department": employee.department if employee else None,
+            "total_messages": len(chat_history),
+            "user_messages": user_messages,
+            "bot_messages": bot_messages,
+            "chat_history": chat_history,
+            "created_at": conv.created_at.isoformat(),
+            "updated_at": conv.updated_at.isoformat() if conv.updated_at else None
+        })
+
+    return {
+        "mode": "general",
+        "chatbot_id": str(chatbot_id),
+        "total_conversations": len(formatted_conversations),
+        "conversations": formatted_conversations
     }
 
 
@@ -773,6 +848,7 @@ def get_employee_evaluation_service(
         ReviewerEmployee.employee_name.label("reviewer_name"),
         ReviewedEmployee.id.label("reviewed_employee_id"),
         ReviewerEmployee.id.label("reviewer_id"),
+        ReviewedEmployee.department.label("reviewed_employee_department"),
     ) \
         .outerjoin(ReviewedEmployee, PeopleAnalyzer.employee_id == ReviewedEmployee.id) \
         .outerjoin(ReviewerEmployee, PeopleAnalyzer.created_by == ReviewerEmployee.id) \
@@ -788,7 +864,7 @@ def get_employee_evaluation_service(
 
     evaluations: List[Dict[str, Any]] = []
 
-    for entry, reviewed_employee_name, reviewer_name, reviewed_employee_id, reviewer_id in entries:
+    for entry, reviewed_employee_name, reviewer_name, reviewed_employee_id, reviewer_id, reviewed_employee_department in entries:
         evaluations.append({
             "id": str(entry.id),
 
@@ -803,6 +879,8 @@ def get_employee_evaluation_service(
                 "id": str(reviewed_employee_id) if reviewed_employee_id else None,
                 "name": reviewed_employee_name if reviewed_employee_id else None
             },
+
+            "department": reviewed_employee_department or "N/A",
 
             # ✅ answers JSON (exact as stored)
             "answers": entry.answers or {},
