@@ -46,8 +46,14 @@ def detect_user_intent(user_message: str, chatbot_mode: str = "quiz") -> str:
             # Accept typed words: positive, negative, average
             if msg_lower in ["positive", "negative", "average"]:
                 return "answer"
-             
-              
+            # Accept frequency-based answers
+            frequency_answers = [
+                "always", "often", "frequently", "very often",
+                "sometimes", "occasionally", "rarely", "seldom",
+                "never", "not often", "not frequently"
+            ]
+            if msg_lower in frequency_answers:
+                return "answer"
         
         # Fast rule-based detection for obvious cases
         greetings = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening',"start"]
@@ -77,37 +83,59 @@ def detect_user_intent(user_message: str, chatbot_mode: str = "quiz") -> str:
         if any(msg_lower == phrase or msg_lower.startswith(phrase + ' ') for phrase in skip_phrases):
             return "skip"
         
+        # Clarification question detection - MUST come before answer detection
+        # Use more specific checks to avoid false positives
+        clarification_keywords = [
+            'what is', 'what does', 'what do you mean', 'what does it mean',
+            'can you explain', 'could you explain',
+            "i don't understand", "i dont understand", "not clear", "unclear",
+            'help me understand', 'what exactly', 'define', 'meaning of',
+            'can you clarify', 'could you clarify', 'please explain'
+        ]
+        # Check for single-word clarification requests
+        if msg_lower in ['explain', 'clarify', 'help']:
+            return "clarification_question"
+        # Check for phrases (to avoid false positives like "i am good" matching "i am")
+        if any(keyword in msg_lower for keyword in clarification_keywords):
+            return "clarification_question"
+        
         # For ambiguous cases, use Gemini
         prompt = f"""Classify the user's intent in a quiz context.
 
 User message: "{user_message}"
 
 Classify as ONE of these intents:
-1. "clarification_question" - User asking for help/explanation (e.g., "explain this", "what does this mean?", "I don't understand")
+1. "clarification_question" - ONLY if user is explicitly asking for help or explanation about the question itself
 2. "skip" - User wants to skip (e.g., "skip", "don't know", "I don't know")
-3. "answer" - User providing an answer (e.g., "A", "option B", "I think it's C", any actual answer)
+3. "answer" - User providing an answer (THIS IS THE DEFAULT for most responses)
 4. "end_quiz" - User wants to end the quiz (e.g., "I'm done", "submit")
 5. "navigate_previous" - User wants to go to previous question (e.g., "previous question", "go back")
 6. "navigate_next" - User wants to move to next question (e.g., "next question")
-7. "start" - treat as greeting
 
+IMPORTANT: Most user messages should be classified as "answer". Only classify as "clarification_question" if the user is explicitly asking about the meaning of the question, not if they're providing their answer.
 
 Respond with ONLY ONE WORD: clarification_question, skip, answer, end_quiz, navigate_previous, or navigate_next.
 
-NOTE: if user use +, _ or +- 8. "Agree or Disagree, Partially Agree or agree disagree etc", it will be considered as answer.
-
 Examples:
-"explain" -> clarification_question
-"i don't get the question" -> clarification_question
-"can you clarify?" -> clarification_question
+"explain this question" -> clarification_question
+"what does this mean?" -> clarification_question
+"i don't understand the question" -> clarification_question
 "previous question" -> navigate_previous
 "go back" -> navigate_previous
 "next question" -> navigate_next
+"skip" -> skip
 "don't know" -> skip
 "I don't know" -> skip
 "A" -> answer
 "option B" -> answer
 "The answer is Paris" -> answer
+"I think it's true" -> answer
+"i am good" -> answer
+"yes" -> answer
+"no" -> answer
+"happy" -> answer
+"very well" -> answer
+"not bad" -> answer
 "I'm done" -> end_quiz
 """
         
@@ -293,22 +321,15 @@ def handle_clarification_question(
     chatbot_name: str,
     questions: List[Dict[str, Any]],
     quiz_state: Dict[str, Any],
-    conversation_history: List[Dict[str, str]]
+    conversation_history: List[Dict[str, str]],
+    chatbot_mode: str = "quiz"
 ) -> Dict[str, Any]:
     """
     Handle user questions about the quiz using RAG context.
     Uses functional retrieve_context() and generate_with_retry().
+    For people_analyzer mode, provides direct explanations without RAG.
     """
     try:
-        # Get relevant context using functional RAG service
-        context, _ = retrieve_context(
-            chatbot_name=chatbot_name,
-            query=query,
-            top_k=5,
-            min_score=0.5,
-            max_context_chars=2000
-        )
-        
         current_q_index = quiz_state["current_index"]
         current_question = questions[current_q_index] if current_q_index < len(questions) else None
         
@@ -317,35 +338,72 @@ def handle_clarification_question(
         if current_question:
             q_text = current_question.get('text', current_question.get('question', ''))
         
-        prompt = f"""You are a helpful quiz assistant. A user is taking a quiz and has a question.
+        # Different handling for people_analyzer mode
+        if chatbot_mode == "people_analyzer":
+            prompt = f"""You are a professional HR assistant helping employees understand evaluation questions during a People Analyzer assessment.
+
+Current Question Being Evaluated: {q_text}
+
+Employee's Clarification Request: {query}
+
+IMPORTANT GUIDELINES:
+- Directly answer what the employee is asking about
+- Explain the meaning of terms, concepts, or behaviors mentioned in the question
+- Provide clear, professional definitions and context
+- Be neutral and unbiased
+- DO NOT suggest a rating (+, -, ±)
+- DO NOT choose or recommend an answer
+- DO NOT influence how they should evaluate
+- Keep response clear and helpful (2-4 sentences)
+
+Example responses:
+- If asked "what is approachable": "Approachable means being easy to talk to, friendly, and welcoming when others need to communicate or seek help. It's about making others feel comfortable reaching out to you."
+- If asked "what do you mean by integrity": "Integrity refers to honesty, ethical behavior, and being trustworthy in actions and decisions. It means doing the right thing even when no one is watching."
+- If asked "what's professional behavior": "Professional behavior includes maintaining appropriate conduct, meeting commitments, treating others with respect, and upholding workplace standards."
+- If asked "what does collaborative mean": "Collaborative means working well with others, sharing ideas, and contributing to team efforts. It's about being a good team player."
+
+Now provide a helpful explanation:"""
+            
+            # Generate response using Gemini
+            model = genai.GenerativeModel(config.GEMINI_MODEL)
+            response_obj = model.generate_content(prompt)
+            clarification_response = response_obj.text.strip()
+            
+            full_response = f"{clarification_response}\n\n💡 When you're ready, please provide your feedback: + (Positive), - (Scope for improvement), ± (Neutral), or frequency terms (often, sometimes, rarely, etc.)"
+        
+        else:
+            # Regular quiz mode - provide direct helpful explanations
+            prompt = f"""You are a helpful quiz assistant. A user is taking a quiz and has a question about the quiz question itself.
 
 Current Quiz Question: {q_text if q_text else 'N/A'}
 
-Relevant Context from Knowledge Base:
-{context if context else "(No additional context available)"}
+User's Clarification Request: {query}
 
-User's Question: {query}
+IMPORTANT GUIDELINES:
+- Directly answer what the user is asking about
+- If they're asking about a term or concept in the question, explain it clearly
+- Provide helpful context WITHOUT giving away the answer
+- Be encouraging and supportive
+- Keep response clear and concise (2-4 sentences)
 
-Provide a helpful, friendly response that clarifies their doubt WITHOUT giving away the answer to the quiz question.
-Be encouraging and guide them to think through the question themselves.
-Keep your response concise (2-3 sentences max).
-"""
-        
-        # Use functional generate_with_retry
-        response_obj = generate_with_retry(
-            prompt=prompt,
-            conversation_history=conversation_history[-3:] if len(conversation_history) > 3 else conversation_history,
-            model_name=config.GEMINI_MODEL,
-            max_retries=2
-        )
-        
-        clarification_response = response_obj.text.strip()
-        
-        # Add reminder
-        if current_question:
+Example responses:
+- If asked "what is good fit": "A good fit typically refers to how well someone's skills, values, and work style align with a role or organization's requirements and culture. It means being well-suited for the position."
+- If asked "what do you mean by teamwork": "Teamwork is the ability to work collaboratively with others toward common goals, contributing your skills while respecting and supporting team members."
+- If asked "what's leadership": "Leadership involves guiding, motivating, and influencing others to achieve goals. It includes taking initiative, making decisions, and inspiring team members."
+- If asked "explain motivation": "Motivation refers to the drive, enthusiasm, and willingness to accomplish tasks and achieve goals. It's the inner energy that pushes you to perform and succeed."
+
+Now provide a helpful explanation:"""
+            
+            # Generate response using Gemini
+            try:
+                model = genai.GenerativeModel(config.GEMINI_MODEL)
+                response_obj = model.generate_content(prompt)
+                clarification_response = response_obj.text.strip()
+            except Exception as e:
+                log.error(f"Error generating clarification response: {e}")
+                clarification_response = "I understand you have a question about the quiz. Could you please rephrase it, or feel free to provide your answer."
+            
             full_response = f"{clarification_response}\n\n💡 When you're ready, please provide your answer or type 'skip' to move on."
-        else:
-            full_response = clarification_response
         
         return {
             "response": full_response,
@@ -682,7 +740,8 @@ def quiz_query_service(
                 chatbot_name=chatbot_name,
                 questions=questions,
                 quiz_state=quiz_state,
-                conversation_history=conversation_history
+                conversation_history=conversation_history,
+                chatbot_mode=chatbot_mode
             )
         
         # Handle skip
@@ -760,14 +819,26 @@ def quiz_query_service(
                 }
                 
                 query_lower = query.strip().lower()
+                
+                # Frequency-based answers (often, sometimes, rarely, etc.)
+                frequency_answers = [
+                    "always", "often", "frequently", "very often",
+                    "sometimes", "occasionally", "rarely", "seldom",
+                    "never", "not often", "not frequently"
+                ]
+                
+                # Check if it's a word-based answer that should be converted to symbol
                 if query_lower in word_to_symbol:
                     query = word_to_symbol[query_lower]
                 
-                # Validate answer is one of the valid symbols
+                # Validate answer is one of the valid symbols OR a frequency answer
                 valid_answers = ["+", "-", "±", "+-", "-+"]
-                if query.strip() not in valid_answers:
+                is_frequency_answer = query_lower in frequency_answers
+                
+                if query.strip() not in valid_answers and not is_frequency_answer:
                     # Not a valid people analyzer answer - treat as clarification request
                     current_question = questions[current_q_index]
+                    q_text = current_question.get('text', current_question.get('question', ''))
                     formatted_q = format_question_for_display(
                         current_question,
                         current_q_index,
@@ -776,20 +847,26 @@ def quiz_query_service(
                     
                     prompt = f"""You are a professional HR assistant helping employees understand evaluation questions during a People Analyzer assessment.
 
-Current Question: {current_question.get('question', '')}
+Current Question Being Asked: {q_text}
 
-Employee Query: {query}
+Employee's Clarification Request: {query}
 
 IMPORTANT GUIDELINES:
-- Provide a clear, supportive response that helps clarify the question
+- Directly answer what the employee is asking about
+- Explain the meaning of terms or concepts in the question
+- Provide context to help them understand what's being evaluated
 - Be professional, neutral, and unbiased
-- Help the employee understand what is being asked
 - DO NOT suggest a rating (+, -, ±)
 - DO NOT choose or recommend an answer
 - DO NOT influence how they should evaluate
-- Keep response brief and focused (2-4 sentences)
+- Keep response clear and focused (2-4 sentences)
 
-Respond in a helpful, clarifying manner:"""
+Example responses:
+- If asked "what is approachable": "Approachable means being easy to talk to, friendly, and welcoming when others need to communicate or seek help."
+- If asked "what do you mean by integrity": "Integrity refers to honesty, ethical behavior, and being trustworthy in actions and decisions."
+- If asked "what's professional behavior": "Professional behavior includes maintaining appropriate conduct, meeting commitments, and treating others with respect in the workplace."
+
+Now respond to the employee's question:"""
                     
                     # Generate a conversational response using Gemini
                     try:
@@ -798,9 +875,9 @@ Respond in a helpful, clarifying manner:"""
                         gemini_response = response_obj.text.strip()
                     except Exception as e:
                         log.error(f"Error generating Gemini response: {e}")
-                        gemini_response = "I understand you have a question. Please feel free to provide your feedback using +, -, or ± based on your assessment."
+                        gemini_response = "I understand you have a question. Could you please rephrase it, or provide your feedback using +, -, ± based on your assessment."
                     
-                    response = f"{gemini_response}\n\n---\n\n{formatted_q}\n\nPlease provide your feedback: + (Positive), - (Scope for improvement), or ± (Neutral)"
+                    response = f"{gemini_response}\n\n---\n\n{formatted_q}\n\nPlease provide your feedback: + (Positive), - (Scope for improvement), ± (Neutral), or frequency terms (always, often, sometimes, rarely, never)"
                     
                     # CRITICAL: Don't modify quiz_state - preserve all previous answers
                     return {

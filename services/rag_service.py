@@ -22,7 +22,7 @@ def retrieve_context(
     chatbot_name: str,
     query: str,
     top_k: int = 8,  # Increased for better coverage
-    min_score: float = 0.62,  # Lowered to retrieve more potentially relevant chunks
+    min_score: float = 0.5,  # Lowered to retrieve more potentially relevant chunks
     max_context_chars: int = 3500,  # Increased to allow more context
     document_type: Optional[str] = None
 ) -> Tuple[str, List[Dict[str, Any]]]:
@@ -33,55 +33,61 @@ def retrieve_context(
     NO LLM CALLS - JUST RETRIEVAL.
     Logs embedding cost and prints retrieved chunks for debugging.
     """
-    # Generate query embedding ONCE with cost logging
-    log.info(f"🔍 Retrieving context for: {query[:60]}...")
-    query_vector = generate_embedding(query)  # Cost logged inside
+    try:
+        # Generate query embedding ONCE with cost logging
+        log.info(f"🔍 Retrieving context for: {query[:60]}...")
+        query_vector = generate_embedding(query)  # Cost logged inside
+        
+        # Search vector store
+        filters = {'document_type': document_type} if document_type else None
+        chunks = search_similar(
+            collection_name=chatbot_name,
+            query_vector=query_vector,
+            limit=top_k,
+            min_score=min_score,
+            filters=filters
+        )
+        
+        if not chunks:
+            log.info("No relevant context found")
+            return "", []
+        
+        # Format context and log chunks
+        context_parts = []
+        total_chars = 0
+        valid_chunks = []
+        
+        for idx, chunk in enumerate(chunks, 1):
+            text = chunk.get('text', '').strip()
+            if not text or len(text) < 20:
+                continue
+            
+            source = chunk.get('source_file', 'Unknown')
+            doc_type = chunk.get('document_type', 'unknown')
+            
+            chunk_text = f"[Source: {source} ({doc_type})]\n{text}\n"
+            
+            if total_chars + len(chunk_text) > max_context_chars:
+                break
+            
+            # Log each retrieved chunk for debugging
+            log.info(f"Retrieved Chunk {idx}/{len(chunks)} (Score: {chunk.get('score', 0):.3f}):")
+            log.info(f"{chunk_text[:500]}..." if len(chunk_text) > 500 else chunk_text)
+            log.info("---")  # Separator for clarity
+            
+            context_parts.append(chunk_text)
+            valid_chunks.append(chunk)
+            total_chars += len(chunk_text)
+        
+        context = "\n---\n".join(context_parts)
+        log.info(f"✓ Context: {total_chars} chars from {len(valid_chunks)} chunks")
+        
+        return context, valid_chunks
     
-    # Search vector store
-    filters = {'document_type': document_type} if document_type else None
-    chunks = search_similar(
-        collection_name=chatbot_name,
-        query_vector=query_vector,
-        limit=top_k,
-        min_score=min_score,
-        filters=filters
-    )
-    
-    if not chunks:
-        log.info("No relevant context found")
+    except Exception as e:
+        log.error(f"Error retrieving context: {e}", exc_info=True)
+        # Return empty context instead of raising - let the caller handle gracefully
         return "", []
-    
-    # Format context and log chunks
-    context_parts = []
-    total_chars = 0
-    valid_chunks = []
-    
-    for idx, chunk in enumerate(chunks, 1):
-        text = chunk.get('text', '').strip()
-        if not text or len(text) < 20:
-            continue
-        
-        source = chunk.get('source_file', 'Unknown')
-        doc_type = chunk.get('document_type', 'unknown')
-        
-        chunk_text = f"[Source: {source} ({doc_type})]\n{text}\n"
-        
-        if total_chars + len(chunk_text) > max_context_chars:
-            break
-        
-        # Log each retrieved chunk for debugging
-        log.info(f"Retrieved Chunk {idx}/{len(chunks)} (Score: {chunk.get('score', 0):.3f}):")
-        log.info(f"{chunk_text[:500]}..." if len(chunk_text) > 500 else chunk_text)
-        log.info("---")  # Separator for clarity
-        
-        context_parts.append(chunk_text)
-        valid_chunks.append(chunk)
-        total_chars += len(chunk_text)
-    
-    context = "\n---\n".join(context_parts)
-    log.info(f" Context: {total_chars} chars from {len(valid_chunks)} chunks")
-    
-    return context, valid_chunks
 
 
 # ============================================================================
@@ -180,12 +186,21 @@ def generate_rag_response(
         log.info(f"🤖 RAG query for '{chatbot_name}': {query[:60]}...")
         
         # Step 1: Retrieve context (embedding cost logged inside)
-        context, source_chunks = retrieve_context(
-            chatbot_name=chatbot_name,
-            query=query,
-            top_k=top_k,
-            min_score=min_score
-        )
+        context = ""
+        source_chunks = []
+        
+        try:
+            context, source_chunks = retrieve_context(
+                chatbot_name=chatbot_name,
+                query=query,
+                top_k=top_k,
+                min_score=min_score
+            )
+            log.info(f"Context retrieved: {len(source_chunks)} chunks, has_content: {bool(context)}")
+        except Exception as retrieval_error:
+            log.warning(f"Context retrieval error: {retrieval_error}. Proceeding without context.")
+            context = ""
+            source_chunks = []
         
         # Step 2: Build prompt
         base_instructions = chatbot_instructions or (
@@ -196,6 +211,7 @@ def generate_rag_response(
         has_context = bool(context and context.strip())
         
         if has_context:
+            log.info(f"✓ Using context from documents ({len(source_chunks)} chunks)")
             prompt = f"""{base_instructions}
 
 Relevant Context:
@@ -212,14 +228,17 @@ CRITICAL INSTRUCTIONS - Read Carefully:
    - CLARIFICATION REQUEST (what do you mean, can you explain): Refer to previous context or ask what specifically they want clarified
    - OUT OF SCOPE (weather, sports, personal advice): Politely redirect to company-related topics
 
-2. FOR KNOWLEDGE QUESTIONS ONLY:
+2. FOR KNOWLEDGE QUESTIONS - CRITICAL RULE:
+   YOU MUST USE THE CONTEXT PROVIDED ABOVE. DO NOT USE YOUR GENERAL KNOWLEDGE.
+   
    a) If context DIRECTLY answers the question:
-      - Provide clear, accurate answer
+      - Provide clear, accurate answer FROM THE CONTEXT
       - Use natural language (don't say "according to the documents")
-      - Be specific with numbers, dates, policies, names if present
+      - Be specific with numbers, dates, policies, names if present IN THE CONTEXT
+      - DO NOT add information from your training data
    
    b) If context is PARTIALLY relevant but incomplete:
-      - Answer what you CAN from context
+      - Answer what you CAN from context ONLY
       - Clearly state what information is missing
       - Example: "Based on company policy, X is required. However, I don't have information about Y in the documents. Please contact HR for complete details."
    
@@ -227,6 +246,8 @@ CRITICAL INSTRUCTIONS - Read Carefully:
       - Say: "I don't have information about that in the company documents."
       - Suggest 2-3 related topics you CAN help with from the context
       - Example: "I don't have information about remote work policies. I can help with: leave policies, working hours, or expense reimbursement."
+
+IMPORTANT: When answering about company name, CEO, leadership, or company information - ALWAYS use the information from the context above, NOT your general knowledge about companies like Google.
 
 3. HANDLING SPECIFIC EDGE CASES:
 
@@ -303,6 +324,7 @@ Example: if you see both "Amol Vaidya – Co-founder & CEO" and a description of
 
 Response:"""
         else:
+            log.warning(f"⚠️ NO CONTEXT FOUND for query: '{query}' in chatbot '{chatbot_name}'")
             prompt = f"""{base_instructions}
 
 User Question: {query}
@@ -349,8 +371,20 @@ Respond naturally and helpfully:"""
     
     except Exception as e:
         log.error(f"❌ RAG failed: {e}", exc_info=True)
+        
+        # Provide more helpful error messages based on error type
+        error_msg = str(e).lower()
+        if "collection" in error_msg and ("not found" in error_msg or "does not exist" in error_msg):
+            response_text = "This chatbot doesn't have any knowledge base yet. Please upload documents first or contact the administrator."
+        elif "embedding" in error_msg or "vector" in error_msg:
+            response_text = "I'm having trouble processing your question. Please try rephrasing it or contact support."
+        elif "api" in error_msg or "quota" in error_msg or "rate limit" in error_msg:
+            response_text = "The AI service is temporarily unavailable. Please try again in a moment."
+        else:
+            response_text = "I'm having trouble processing your request. Please try again or contact support if the issue persists."
+        
         return {
-            "response": "I'm having trouble processing your request. Please try again.",
+            "response": response_text,
             "sources": [],
             "context_used": False,
             "error": str(e)
