@@ -63,7 +63,7 @@ def _init_gemini() -> bool:
         if not hasattr(config, 'GEMINI_API_KEY') or not config.GEMINI_API_KEY:
             return False
         genai.configure(api_key=config.GEMINI_API_KEY)
-        _gemini_model = getattr(config, 'GEMINI_EMBEDDING_MODEL', 'models/text-embedding-004')
+        _gemini_model = getattr(config, 'GEMINI_EMBEDDING_MODEL', 'models/gemini-embedding-001')
         log.info(f"✓ Embedding: Gemini ({_gemini_model})")
         return True
     except Exception as e:
