@@ -309,6 +309,19 @@ async def get_chatbot_endpoint(
         ).first()
         questions_data = questions.question_data if questions else []
         
+        # Add default labels for plusminus/discrete questions that don't have them
+        if questions_data and isinstance(questions_data, list):
+            for question in questions_data:
+                if isinstance(question, dict):
+                    q_type = question.get("type", "")
+                    # Check if it's plusminus/discrete and labels are missing or empty
+                    if q_type in ["plusminus", "discrete"]:
+                        labels = question.get("labels")
+                        if not labels or (isinstance(labels, list) and len(labels) == 0):
+                            # Add default labels
+                            question["labels"] = ["Often", "Not Often", "Sometimes"]
+                            log.info(f"Added default labels to question: {question.get('text', 'Unknown')[:50]}")
+        
         # Get permissions
         permissions = db.query(ChatbotPermission).filter(
             ChatbotPermission.chatbot_id == chatbot.chatbot_id
