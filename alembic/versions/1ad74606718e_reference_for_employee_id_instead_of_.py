@@ -1,3 +1,10 @@
+"""reference for employee_id instead of id in chatbot_access
+
+Revision ID: 1ad74606718e
+Revises: 2c8b0dae2ab5
+Create Date: 2025-12-24
+"""
+
 from alembic import op
 import sqlalchemy as sa
 

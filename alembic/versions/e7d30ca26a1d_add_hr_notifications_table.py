@@ -18,10 +18,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.drop_table("hr_notifications")
-
-def downgrade() -> None:
-     op.create_table(
+    op.create_table(
         "hr_notifications",
         sa.Column(
             "id",
@@ -32,13 +29,11 @@ def downgrade() -> None:
         sa.Column(
             "employee_id",
             postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("employees.id", ondelete="SET NULL"),
             nullable=True,
         ),
         sa.Column(
             "chatbot_id",
             postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("chatbots.chatbot_id", ondelete="CASCADE"),
             nullable=False,
         ),
         sa.Column("chatbot_type", sa.String(), nullable=False),
@@ -64,7 +59,6 @@ def downgrade() -> None:
         sa.Column(
             "assigned_to",
             postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("employees.id", ondelete="SET NULL"),
             nullable=True,
         ),
         sa.Column(
@@ -75,14 +69,21 @@ def downgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.func.now(),
+            server_default=sa.text("now()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.func.now(),
-            onupdate=sa.func.now(),
+            server_default=sa.text("now()"),
             nullable=False,
         ),
+        sa.ForeignKeyConstraint(["employee_id"], ["employees.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(["chatbot_id"], ["chatbots.chatbot_id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["assigned_to"], ["employees.id"], ondelete="SET NULL"),
+        sa.PrimaryKeyConstraint("id"),
     )
+
+
+def downgrade() -> None:
+    op.drop_table("hr_notifications")

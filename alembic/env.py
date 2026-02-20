@@ -5,7 +5,10 @@ from alembic import context
 
 # Import your models
 from stateful_services.database import Base
-from stateful_services.db_schema import Employee, Chatbot, Question, Answer
+from stateful_services.db_schema import (
+    Employee, Chatbot, Question, Answer,
+    PeopleAnalyzer, ChatbotPermission, ChatbotAccess,
+)
 
 # Alembic Config object
 config = context.config
