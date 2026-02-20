@@ -42,11 +42,11 @@ def upgrade():
 
     # 7. Add employee_code column if not exists
     conn = op.get_bind()
-    result = conn.execute("""
+    result = conn.execute(sa.text("""
         SELECT column_name
         FROM information_schema.columns
         WHERE table_name='employees' AND column_name='employee_code'
-    """).fetchone()
+    """)).fetchone()
 
     if not result:
         op.add_column('employees', sa.Column('employee_code', sa.String(), nullable=True))
