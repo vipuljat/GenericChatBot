@@ -8,6 +8,7 @@ from stateful_services.database import Base
 from stateful_services.db_schema import (
     Employee, Chatbot, Question, Answer,
     PeopleAnalyzer, ChatbotPermission, ChatbotAccess,
+    TeamProject, EmployeeTeamProjectMapping,
 )
 
 # Alembic Config object

@@ -10,7 +10,12 @@ from fastapi import HTTPException
 from typing import Optional, Dict, Any
 import uuid
 
-from stateful_services.db_schema import Employee, PeopleAnalyzer, Chatbot, Question, ChatbotPermission
+from collections import defaultdict
+
+from stateful_services.db_schema import (
+    Employee, PeopleAnalyzer, Chatbot, Question, ChatbotPermission,
+    EmployeeTeamProjectMapping, TeamProject,
+)
 from utils.logging import log
 
 # ==================================================
@@ -183,11 +188,32 @@ def get_employees_service(
 
     employees = query.order_by(Employee.created_at.asc()).all()
 
-    # ---------- Attach has_answered flag ----------
+    # ---------- Fetch teams/projects for each employee ----------
+    emp_ids = [e.id for e in employees]
+    teams_map: dict = defaultdict(list)
+    projects_map: dict = defaultdict(list)
+
+    if emp_ids:
+        mappings = (
+            db.query(EmployeeTeamProjectMapping, TeamProject)
+            .join(TeamProject, TeamProject.id == EmployeeTeamProjectMapping.team_project_id)
+            .filter(EmployeeTeamProjectMapping.employee_id.in_(emp_ids))
+            .all()
+        )
+        for mapping, tp in mappings:
+            entry = {"id": str(tp.id), "name": tp.name}
+            if tp.type == "team":
+                teams_map[mapping.employee_id].append(entry)
+            else:
+                projects_map[mapping.employee_id].append(entry)
+
+    # ---------- Attach has_answered flag + teams/projects ----------
     response["employees"] = [
         {
             **employee.__dict__,
             "has_answered": employee.id in answered_employee_ids,
+            "teams": teams_map.get(employee.id, []),
+            "projects": projects_map.get(employee.id, []),
         }
         for employee in employees
     ]

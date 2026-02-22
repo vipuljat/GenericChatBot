@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Column, String, Text, DateTime, ForeignKey
+    Column, String, Text, DateTime, ForeignKey, UniqueConstraint
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.sql import func
@@ -92,3 +92,26 @@ class ChatbotAccess(Base):
     allowed_users=Column(JSONB, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class TeamProject(Base):
+    __tablename__ = "teams_projects"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String, nullable=False)
+    type = Column(String, nullable=False)  # 'team' | 'project'
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class EmployeeTeamProjectMapping(Base):
+    __tablename__ = "employee_team_project_mapping"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    employee_id = Column(UUID(as_uuid=True), ForeignKey("employees.id", ondelete="CASCADE"), nullable=False)
+    team_project_id = Column(UUID(as_uuid=True), ForeignKey("teams_projects.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("employee_id", "team_project_id", name="uq_employee_team_project"),
+    )

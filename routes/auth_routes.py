@@ -100,13 +100,16 @@ async def auth_callback(
         
         print(f"DEBUG: Extracted - ID: {microsoft_id}, Name: {employee_name}, Email: {employee_email}")
         
-        employee_role = "employee"
         department = user_info.get("department")
 
         # Check if employee exists
         employee = db.query(Employee).filter(Employee.employee_email == employee_email).first()
 
         if not employee:
+            # First user ever becomes admin; all subsequent users are employees
+            is_first_user = db.query(Employee.id).first() is None
+            employee_role = "admin" if is_first_user else "employee"
+
             # Create new employee
             employee = Employee(
                 employee_id=microsoft_id,
