@@ -149,7 +149,7 @@ def bulk_assign(db: Session, assignments: list) -> dict:
 def export_assignments(db: Session) -> BytesIO:
     """
     Build an Excel workbook with columns:
-      employee_id | employee_name | teams | projects
+      email | employee_name | teams | projects
     Each row is one employee; teams/projects are comma-separated names.
     Returns a BytesIO object ready for streaming.
     """
@@ -177,13 +177,13 @@ def export_assignments(db: Session) -> BytesIO:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Assignments"
-    ws.append(["employee_id", "employee_name", "teams", "projects"])
+    ws.append(["email", "employee_name", "teams", "projects"])
 
     for emp in employees:
         emp_uuid = str(emp.id)
         emp_data = mapping_lookup.get(emp_uuid, {"teams": [], "projects": []})
         ws.append([
-            emp_uuid,
+            emp.employee_email or "",
             emp.employee_name,
             ", ".join(emp_data["teams"]),
             ", ".join(emp_data["projects"]),
@@ -198,9 +198,9 @@ def export_assignments(db: Session) -> BytesIO:
 def import_assignments(db: Session, file_bytes: bytes) -> dict:
     """
     Parse an Excel file and replace assignments for each listed employee.
-    Expected columns (row 1 = header): employee_id, employee_name, teams, projects
+    Expected columns (row 1 = header): email, employee_name, teams, projects
 
-    - employee_id: UUID primary key of the employee (employees.id)
+    - email: employee_email of the employee (employees.employee_email)
     - teams: comma-separated team names (empty string = clear all teams)
     - projects: comma-separated project names (empty string = clear all projects)
     - A missing/None cell means "no change" for that dimension.
@@ -217,7 +217,7 @@ def import_assignments(db: Session, file_bytes: bytes) -> dict:
     # Normalise header
     header = [str(c).strip().lower() if c is not None else "" for c in rows[0]]
     try:
-        col_emp_id   = header.index("employee_id")
+        col_email    = header.index("email")
         col_teams    = header.index("teams")
         col_projects = header.index("projects")
     except ValueError as e:
@@ -228,22 +228,27 @@ def import_assignments(db: Session, file_bytes: bytes) -> dict:
     team_name_to_id    = {tp.name: str(tp.id) for tp in all_tps if tp.type == "team"}
     project_name_to_id = {tp.name: str(tp.id) for tp in all_tps if tp.type == "project"}
 
-    # Pre-load valid employee UUIDs
-    valid_employee_ids = {str(e.id) for e in db.query(Employee.id).all()}
+    # Pre-load email -> UUID map for employees
+    email_to_id = {
+        e.employee_email.strip().lower(): str(e.id)
+        for e in db.query(Employee).all()
+        if e.employee_email
+    }
 
     skipped_rows = []
     unresolved_names = set()
     assignments_to_save = []
 
     for row_idx, row in enumerate(rows[1:], start=2):
-        raw_emp_id = row[col_emp_id]
-        if raw_emp_id is None:
-            skipped_rows.append({"row": row_idx, "reason": "employee_id is empty"})
+        raw_email = row[col_email]
+        if raw_email is None:
+            skipped_rows.append({"row": row_idx, "reason": "email is empty"})
             continue
 
-        emp_id = str(raw_emp_id).strip()
-        if emp_id not in valid_employee_ids:
-            skipped_rows.append({"row": row_idx, "reason": f"employee_id '{emp_id}' not found"})
+        email = str(raw_email).strip().lower()
+        emp_id = email_to_id.get(email)
+        if emp_id is None:
+            skipped_rows.append({"row": row_idx, "reason": f"email '{email}' not found"})
             continue
 
         # Resolve teams
