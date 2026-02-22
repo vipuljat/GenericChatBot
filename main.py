@@ -16,6 +16,7 @@ from routes.people_analyzer_routes import router as people_analyzer_router
 from routes.team_project_routes import router as team_project_router
 from stateful_services.database import check_all_health
 from utils.logging import log
+from middleware.jwt_middleware import JWTMiddleware
 
 
 @asynccontextmanager
@@ -60,6 +61,10 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # JWT authentication — must be added AFTER CORS so CORS headers are
+    # still present on 401 responses
+    application.add_middleware(JWTMiddleware)
     
     # Register routes
     application.include_router(auth_router, prefix="/auth", tags=["Authentication"])

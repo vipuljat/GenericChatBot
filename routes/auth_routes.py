@@ -140,7 +140,8 @@ async def auth_callback(
         jwt_payload = {
             "id": microsoft_id,
             "email": employee_email,
-            "name": employee_name
+            "name": employee_name,
+            "role": employee.employee_role,
         }
         jwt_token = auth_service.create_jwt_token(jwt_payload)
 
