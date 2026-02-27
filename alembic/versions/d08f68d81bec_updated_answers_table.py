@@ -26,20 +26,42 @@ def upgrade() -> None:
     op.alter_column('answers', 'answer_data',
                existing_type=postgresql.JSONB(astext_type=sa.Text()),
                nullable=True)
-    op.drop_index(op.f('idx_answers_attempter_id'), table_name='answers')
-    op.drop_index(op.f('idx_answers_question_id'), table_name='answers')
-    op.drop_index(op.f('idx_answers_session_id'), table_name='answers')
-    op.drop_index(op.f('idx_answers_source_type'), table_name='answers')
-    op.drop_constraint(op.f('answers_attempter_id_fkey'), 'answers', type_='foreignkey')
-    op.drop_constraint(op.f('fk_answers_question_id'), 'answers', type_='foreignkey')
+
+    # Drop indexes only if they exist (they may not exist on fresh databases
+    # since the initial migration didn't create them)
+    conn = op.get_bind()
+    for idx_name in [
+        'idx_answers_attempter_id',
+        'idx_answers_question_id',
+        'idx_answers_session_id',
+        'idx_answers_source_type',
+    ]:
+        result = conn.execute(sa.text(
+            "SELECT 1 FROM pg_indexes WHERE indexname = :name"
+        ), {"name": idx_name})
+        if result.fetchone():
+            op.drop_index(op.f(idx_name), table_name='answers')
+
+    # Drop constraints only if they exist
+    for constraint_name in ['answers_attempter_id_fkey', 'fk_answers_question_id']:
+        result = conn.execute(sa.text(
+            "SELECT 1 FROM information_schema.table_constraints "
+            "WHERE constraint_name = :name AND table_name = 'answers'"
+        ), {"name": constraint_name})
+        if result.fetchone():
+            op.drop_constraint(op.f(constraint_name), 'answers', type_='foreignkey')
+
     op.create_foreign_key(None, 'answers', 'employees', ['attempter_by_id'], ['id'], ondelete='SET NULL')
-    op.drop_column('answers', 'answer_content')
-    op.drop_column('answers', 'attempter_id')
-    op.drop_column('answers', 'attempter_name')
-    op.drop_column('answers', 'question_id')
-    op.drop_column('answers', 'question_snapshot')
-    op.drop_column('answers', 'source_type')
-    op.drop_column('answers', 'session_id')
+
+    # Drop columns only if they exist
+    existing_cols = {row[0] for row in conn.execute(sa.text(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = 'answers'"
+    ))}
+    for col in ['answer_content', 'attempter_id', 'attempter_name',
+                'question_id', 'question_snapshot', 'source_type', 'session_id']:
+        if col in existing_cols:
+            op.drop_column('answers', col)
     # ### end Alembic commands ###
 
 

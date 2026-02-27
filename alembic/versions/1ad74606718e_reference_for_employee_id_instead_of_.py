@@ -1,3 +1,10 @@
+"""reference for employee_id instead of id in chatbot_access
+
+Revision ID: 1ad74606718e
+Revises: 2c8b0dae2ab5
+Create Date: 2025-12-24
+"""
+
 from alembic import op
 import sqlalchemy as sa
 
@@ -42,11 +49,11 @@ def upgrade():
 
     # 7. Add employee_code column if not exists
     conn = op.get_bind()
-    result = conn.execute("""
+    result = conn.execute(sa.text("""
         SELECT column_name
         FROM information_schema.columns
         WHERE table_name='employees' AND column_name='employee_code'
-    """).fetchone()
+    """)).fetchone()
 
     if not result:
         op.add_column('employees', sa.Column('employee_code', sa.String(), nullable=True))

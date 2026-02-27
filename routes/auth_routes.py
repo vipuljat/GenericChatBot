@@ -100,13 +100,17 @@ async def auth_callback(
         
         print(f"DEBUG: Extracted - ID: {microsoft_id}, Name: {employee_name}, Email: {employee_email}")
         
-        employee_role = "employee"
         department = user_info.get("department")
 
         # Check if employee exists
         employee = db.query(Employee).filter(Employee.employee_email == employee_email).first()
 
+        is_first_user = False
         if not employee:
+            # First user ever becomes admin; all subsequent users are employees
+            is_first_user = db.query(Employee.id).first() is None
+            employee_role = "admin" if is_first_user else "employee"
+            department = "HR" if is_first_user else (department or "General")
             # Create new employee
             employee = Employee(
                 employee_id=microsoft_id,
@@ -126,7 +130,7 @@ async def auth_callback(
             # Update employee info
             employee.employee_id = microsoft_id
             employee.employee_name = employee_name
-            employee.employee_email = employee_email    
+            employee.employee_email = employee_email
             # employee.department = department
             employee.updated_at = datetime.now(timezone.utc)
             db.commit()
@@ -136,7 +140,8 @@ async def auth_callback(
         jwt_payload = {
             "id": microsoft_id,
             "email": employee_email,
-            "name": employee_name
+            "name": employee_name,
+            "role": employee.employee_role,
         }
         jwt_token = auth_service.create_jwt_token(jwt_payload)
 
@@ -147,7 +152,8 @@ async def auth_callback(
             "employee_name": employee.employee_name,
             "employee_email": employee.employee_email,
             "employee_role": employee.employee_role,
-            "department": employee.department
+            "department": employee.department,
+            "is_first_user": is_first_user,
         }
 
         # Redirect to frontend callback page with token and employee data

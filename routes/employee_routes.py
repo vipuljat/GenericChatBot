@@ -3,7 +3,10 @@ Employee Management Routes
 Handles employee operations including role management
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Body, Form
+from io import BytesIO
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Body, Form, UploadFile, File
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from stateful_services.database import get_db
@@ -11,6 +14,7 @@ from stateful_services.db_schema import Employee
 from typing import Optional, Dict, Any
 import uuid
 import json
+import openpyxl
 from utils.logging import log
 from utils.token_decode import get_current_employee_from_token
 
@@ -482,4 +486,149 @@ def create_employee_service(
             status_code=500,
             detail=f"Failed to create employee: {str(e)}",
         )
+
+
+# ===================== EXCEL EXPORT =====================
+
+_EXPORT_COLUMNS = ["employee_name", "employee_email", "employee_role", "department", "employee_code"]
+_ALLOWED_ROLES  = ["employee", "admin", "manager", "hr"]
+
+
+@router.get("/export", summary="Export all employees as Excel")
+def export_employees(db: Session = Depends(get_db)):
+    """Download an Excel file with all employees. Use it as an import template too."""
+    employees = db.query(Employee).order_by(Employee.employee_name.asc()).all()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Employees"
+    ws.append(_EXPORT_COLUMNS)
+
+    for emp in employees:
+        ws.append([
+            emp.employee_name,
+            emp.employee_email or "",
+            emp.employee_role,
+            emp.department or "",
+            emp.employee_code or "",
+        ])
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=employees.xlsx"},
+    )
+
+
+# ===================== EXCEL IMPORT =====================
+
+@router.post("/import", summary="Bulk-import employees from Excel")
+async def import_employees(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """
+    Upload an .xlsx file to bulk-create or update employees.
+
+    Expected columns (row 1 = header):
+      employee_name | employee_email | employee_role | department | employee_code
+
+    Upsert logic (keyed on employee_email):
+    - Email not in DB  → create new employee (role defaults to 'employee' if blank).
+    - Email already in DB → update name, role, department, employee_code (email never changes).
+    - Rows without employee_name are skipped.
+
+    Response: { created, updated, skipped_rows }
+    """
+    if not file.filename.endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Only .xlsx / .xls files are accepted")
+
+    file_bytes = await file.read()
+
+    try:
+        wb = openpyxl.load_workbook(filename=BytesIO(file_bytes), read_only=True, data_only=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not parse the uploaded file as Excel")
+
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return {"created": 0, "updated": 0, "skipped_rows": []}
+
+    # Normalise header
+    header = [str(c).strip().lower() if c is not None else "" for c in rows[0]]
+    required_cols = {"employee_name", "employee_email"}
+    missing = required_cols - set(header)
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing required columns: {missing}")
+
+    def col(name):
+        return header.index(name)
+
+    has_role  = "employee_role"  in header
+    has_dept  = "department"     in header
+    has_code  = "employee_code"  in header
+
+    created_count = 0
+    updated_count = 0
+    skipped_rows  = []
+
+    for row_idx, row in enumerate(rows[1:], start=2):
+        name  = _cell(row, col("employee_name"))
+        email = _cell(row, col("employee_email"))
+
+        if not name:
+            skipped_rows.append({"row": row_idx, "reason": "employee_name is empty"})
+            continue
+
+        role = _cell(row, col("employee_role")) if has_role else None
+        if role and role not in _ALLOWED_ROLES:
+            skipped_rows.append({"row": row_idx, "reason": f"invalid role '{role}'"})
+            continue
+        if not role:
+            role = "employee"
+
+        dept = _cell(row, col("department")) if has_dept else None
+        code = _cell(row, col("employee_code")) if has_code else None
+
+        if email:
+            existing = db.query(Employee).filter(Employee.employee_email == email).first()
+        else:
+            existing = None
+
+        if existing:
+            existing.employee_name = name
+            existing.employee_role = role
+            if dept is not None:
+                existing.department = dept
+            if code is not None:
+                existing.employee_code = code
+            updated_count += 1
+        else:
+            new_emp = Employee(
+                employee_id=str(uuid.uuid4()),  # placeholder until first SSO login
+                employee_name=name,
+                employee_email=email or None,
+                employee_role=role,
+                department=dept,
+                employee_code=code,
+                meta_data={},
+            )
+            db.add(new_emp)
+            created_count += 1
+
+    db.commit()
+    return {"created": created_count, "updated": updated_count, "skipped_rows": skipped_rows}
+
+
+def _cell(row: tuple, idx: int) -> Optional[str]:
+    """Return a stripped string from a row cell, or None if empty."""
+    val = row[idx] if idx < len(row) else None
+    if val is None:
+        return None
+    s = str(val).strip()
+    return s if s else None
 

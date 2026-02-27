@@ -98,6 +98,7 @@ class MicrosoftAuthService:
                 "sub": user_id,
                 "email": email,
                 "name": name,
+                "role": user_data.get("role", "employee"),
                 "exp": expiration
             }
 
