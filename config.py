@@ -4,8 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Database Configuration - Use DATABASE_URL directly
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres123@192.168.3.36:30018/devchatbot")
- 
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://vipul:vipul123@127.0.0.1:5432/GenericChatbotDB") 
 # Google Gemini AI Configuration
 # Use a stable default model name; avoid experimental unless explicitly configured.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
