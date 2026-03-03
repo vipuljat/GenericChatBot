@@ -225,6 +225,52 @@ def update_employee(
     }
 
 
+@router.delete("/{employee_id}")
+def delete_employee(
+    request: Request,
+    employee_id: uuid.UUID,
+    db: Session = Depends(get_db)
+):
+    """
+    Delete an employee (admin only).
+    """
+
+    admin = require_admin(request, db)
+
+    employee = db.query(Employee).filter(Employee.id == employee_id).first()
+
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    # Prevent admins from deleting themselves
+    if admin.id == employee.id:
+        raise HTTPException(
+            status_code=400,
+            detail="You cannot delete your own account"
+        )
+
+    employee_name = employee.employee_name
+    employee_email = employee.employee_email
+
+    db.delete(employee)
+    db.commit()
+
+    return {
+        "status": "success",
+        "message": f"Employee '{employee_name}' deleted successfully",
+        "deleted_employee": {
+            "id": str(employee_id),
+            "employee_name": employee_name,
+            "employee_email": employee_email,
+        },
+        "deleted_by": {
+            "id": str(admin.id),
+            "name": admin.employee_name,
+            "email": admin.employee_email,
+        },
+    }
+
+
 @router.get("/me")
 def get_current_employee(
     request: Request,
