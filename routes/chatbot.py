@@ -308,6 +308,8 @@ async def get_chatbot_endpoint(
             Question.chatbot_id == chatbot.chatbot_id
         ).first()
         questions_data = questions.question_data if questions else []
+
+        
         
         # Get permissions
         permissions = db.query(ChatbotPermission).filter(

@@ -4,8 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Database Configuration - Use DATABASE_URL directly
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://vipul:vipul123@127.0.0.1:5432/GenericChatbotDB")
- 
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://vipul:vipul123@127.0.0.1:5432/GenericChatbotDB") 
 # Google Gemini AI Configuration
 # Use a stable default model name; avoid experimental unless explicitly configured.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -31,3 +30,4 @@ OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-s
 QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
