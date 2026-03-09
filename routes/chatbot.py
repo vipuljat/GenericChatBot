@@ -316,10 +316,12 @@ async def get_chatbot_endpoint(
             ChatbotPermission.chatbot_id == chatbot.chatbot_id
         ).all()
         for perm in permissions:
-            access_list.append({
-                "reviewer_id": str(perm.reviewer_id),
-                "allowed_users": perm.can_review_users or []
-            })
+            # Skip if reviewer was deleted (reviewer_id is None)
+            if perm.reviewer_id:
+                access_list.append({
+                    "reviewer_id": str(perm.reviewer_id),
+                    "allowed_users": perm.can_review_users or []
+                })
     
     # Get allowed users for ALL modes
     access = db.query(ChatbotAccess).filter(
