@@ -371,6 +371,7 @@ def update_chatbot(
 
         # ── Update ChatbotPermission (review permissions) ──────────────────────
         if access_list is not None:
+            # First, delete all existing permissions for this chatbot
             db.query(ChatbotPermission).filter(
                 ChatbotPermission.chatbot_id == chatbot_id
             ).delete()
@@ -379,7 +380,8 @@ def update_chatbot(
                 reviewer_id = entry.get("reviewer_id") or entry.get("employee_id")
                 can_review_users = entry.get("allowed_users", [])
 
-                if not reviewer_id:
+                # Skip if no reviewer_id or if it's the string "None" (deleted employee)
+                if not reviewer_id or reviewer_id == "None" or reviewer_id == "null":
                     continue
 
                 permission = ChatbotPermission(
@@ -391,6 +393,12 @@ def update_chatbot(
                 db.add(permission)
 
             log.info(f"Replaced review permissions (who can review whom) for {chatbot.chatbot_name}")
+        else:
+            # Even if not updating permissions, clean up any orphaned ones (where reviewer was deleted)
+            db.query(ChatbotPermission).filter(
+                ChatbotPermission.chatbot_id == chatbot_id,
+                ChatbotPermission.reviewer_id == None
+            ).delete()
 
         # Questions update - support both modes
         if questions is not None and chatbot.mode in ("quiz", "people_analyzer"):

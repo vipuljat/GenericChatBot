@@ -22,7 +22,7 @@ def retrieve_context(
     chatbot_name: str,
     query: str,
     top_k: int = 8,  # Increased for better coverage
-    min_score: float = 0.5,  # Lowered to retrieve more potentially relevant chunks
+    min_score: float = 0.3,  # Lowered to retrieve more marginally relevant chunks
     max_context_chars: int = 3500,  # Increased to allow more context
     document_type: Optional[str] = None
 ) -> Tuple[str, List[Dict[str, Any]]]:

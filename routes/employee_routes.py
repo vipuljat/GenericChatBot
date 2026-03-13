@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from stateful_services.database import get_db
-from stateful_services.db_schema import Employee
+from stateful_services.db_schema import Employee, ChatbotPermission, ChatbotAccess
 from typing import Optional, Dict, Any
 import uuid
 import json
@@ -251,6 +251,25 @@ def delete_employee(
 
     employee_name = employee.employee_name
     employee_email = employee.employee_email
+    employee_id_str = str(employee_id)
+
+    # Clean up chatbot permissions where this employee is a reviewer
+    # The FK has ondelete="SET NULL" so reviewer_id becomes NULL, we delete those orphaned records
+    db.query(ChatbotPermission).filter(
+        ChatbotPermission.reviewer_id == employee_id
+    ).delete()
+    
+    # Clean up any references in can_review_users JSONB arrays
+    all_permissions = db.query(ChatbotPermission).all()
+    for perm in all_permissions:
+        if perm.can_review_users and employee_id_str in perm.can_review_users:
+            perm.can_review_users = [uid for uid in perm.can_review_users if uid != employee_id_str]
+    
+    # Clean up any references in ChatbotAccess allowed_users JSONB arrays
+    all_access = db.query(ChatbotAccess).all()
+    for access in all_access:
+        if access.allowed_users and employee_id_str in access.allowed_users:
+            access.allowed_users = [uid for uid in access.allowed_users if uid != employee_id_str]
 
     db.delete(employee)
     db.commit()

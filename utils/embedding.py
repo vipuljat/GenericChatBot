@@ -312,8 +312,8 @@ def split_by_separators(
 def chunk_text(
     text: str,
     metadata: Optional[Dict[str, Any]] = None,
-    chunk_size: int = 600,  # Reduced for more granular chunks
-    overlap: int = 150  # Increased overlap for better context continuity
+    chunk_size: int = 1200,  # Increased for better context preservation
+    overlap: int = 300  # Increased overlap for better context continuity
 ) -> List[Dict[str, Any]]:
     """
     Split text into overlapping chunks with metadata.
@@ -337,7 +337,7 @@ def chunk_text(
     # Build chunk dictionaries
     result = []
     for i, chunk in enumerate(chunks):
-        if len(chunk) < 50:  # Skip very small chunks
+        if not chunk or not chunk.strip():  # Skip empty chunks only
             continue
         chunk_dict = {
             "text": chunk,
@@ -348,7 +348,7 @@ def chunk_text(
         }
         result.append(chunk_dict)
         # Log sample of chunk for debugging
-        log.info(f"Generated Chunk {i+1}/{len(chunks)}: {chunk[:200]}...")
+        log.info(f"Generated Chunk {i+1}/{len(chunks)}: {chunk[:200]}...") 
     
     log.info(f"Chunked text into {len(result)} chunks (size={chunk_size}, overlap={overlap})")
     return result
