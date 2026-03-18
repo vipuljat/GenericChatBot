@@ -185,21 +185,21 @@ def _extract_openai_batch_embeddings(response: Any, expected_count: int) -> List
     return embeddings
 
 
-def _generate_gemini_embedding(text: str) -> List[float]:
+def _generate_gemini_embedding(text: str, task_type: str = "retrieval_document") -> List[float]:
     """Generate and validate a single Gemini embedding."""
     result = genai.embed_content(
         model=_gemini_model,
         content=text,
-        task_type="retrieval_document"
+        task_type=task_type
     )
     return _extract_gemini_embedding(result)
 
 
 def _generate_gemini_embeddings_batch(texts: List[str]) -> List[List[float]]:
-    """Generate and validate a Gemini batch sequentially."""
+    """Generate and validate a Gemini batch sequentially (document indexing)."""
     embeddings: List[List[float]] = []
     for text in texts:
-        embeddings.append(_generate_gemini_embedding(text))
+        embeddings.append(_generate_gemini_embedding(text, task_type="retrieval_document"))
     return embeddings
 
 
@@ -232,9 +232,10 @@ def generate_embedding(text: str) -> List[float]:
         f"${cost['estimated_cost_usd']:.6f} (single text)"
     )
     
+    # Queries use retrieval_query task type (different from document indexing)
     if _use_gemini:
         try:
-            return _generate_gemini_embedding(text)
+            return _generate_gemini_embedding(text, task_type="retrieval_query")
         except GEMINI_EMBEDDING_EXCEPTIONS as e:
             log.error(f"Gemini embedding failed: {e}")
             raise RuntimeError("Gemini embedding request failed") from e
@@ -252,7 +253,7 @@ def generate_embedding(text: str) -> List[float]:
         log.error(f"OpenAI embedding failed: {e}")
         _switch_to_gemini("Falling back to Gemini for embedding...")
         try:
-            return _generate_gemini_embedding(text)
+            return _generate_gemini_embedding(text, task_type="retrieval_query")
         except GEMINI_EMBEDDING_EXCEPTIONS as gemini_error:
             log.error(f"Gemini embedding failed after fallback: {gemini_error}")
             raise RuntimeError("Gemini fallback failed after OpenAI error") from gemini_error
@@ -263,7 +264,7 @@ def generate_embedding(text: str) -> List[float]:
         log.error(f"Invalid OpenAI embedding response: {e}")
         _switch_to_gemini("OpenAI returned an invalid embedding response. Falling back to Gemini...")
         try:
-            return _generate_gemini_embedding(text)
+            return _generate_gemini_embedding(text, task_type="retrieval_query")
         except GEMINI_EMBEDDING_EXCEPTIONS as gemini_error:
             log.error(f"Gemini embedding failed after invalid OpenAI response: {gemini_error}")
             raise RuntimeError("Gemini fallback failed after invalid OpenAI response") from gemini_error
@@ -357,6 +358,134 @@ def generate_embeddings_batch(
 # TEXT CHUNKING FUNCTIONS
 # ============================================================================
 
+# Answer markers — require an explicit delimiter (:, -, .) after the prefix so
+# that words like "Administration" or "And" are never mistaken for answer starts.
+_QA_ANSWER_MARKER = re.compile(
+    r'^(?:'
+    r'A\s*[.:]\s+'           # "A: " or "A. "
+    r'|Ans\s*[-:.]\s*'       # "Ans: " / "Ans - " / "Ans. "
+    r'|Answer\s*\d*\s*[:.]\s*'  # "Answer: " / "Answer 1: "
+    r')',
+    re.IGNORECASE | re.MULTILINE
+)
+
+# Question markers — explicit "Q:" / "Q." / "Question:" only (no plain numbers,
+# because "1." appears everywhere in bullet lists inside answers).
+_QA_EXPLICIT_QUESTION = re.compile(
+    r'^(?:Q\s*[.:]\s*|Question\s*\d*\s*[.:]\s*)',
+    re.IGNORECASE | re.MULTILINE
+)
+
+# Numbered paragraph question: "1. " / "1) " at the START of a paragraph
+# (preceded by a blank line or beginning of text).  Keeps numbered sub-steps
+# inside answers from matching — they appear mid-paragraph, not after \n\n.
+_QA_NUMBERED_PARA_QUESTION = re.compile(
+    r'(?:\A|\n\n)\s*\d+\s*[.)]\s+\S',
+)
+
+
+def _para_is_question(para: str) -> bool:
+    """True when a single paragraph looks like a Q&A question."""
+    return bool(
+        _QA_EXPLICIT_QUESTION.match(para)
+        or _QA_NUMBERED_PARA_QUESTION.match(para)
+    )
+
+
+def _para_is_answer(para: str) -> bool:
+    """True when a single paragraph looks like a Q&A answer."""
+    return bool(_QA_ANSWER_MARKER.match(para))
+
+
+def _chunk_mixed_content(
+    text: str,
+    chunk_size_chars: int,
+    overlap_chars: int,
+    chunk_size_tokens: int,
+    overlap_tokens: int,
+) -> List[str]:
+    """
+    Paragraph-level hybrid chunker for documents with mixed content
+    (Q&A sections, tables, policy text, department info, etc.).
+
+    Algorithm
+    ---------
+    1. Split text into paragraphs (on blank lines).
+    2. Walk paragraphs and detect Q+A pairs: a paragraph that looks like a
+       question immediately followed by a paragraph that looks like an answer
+       → glue them into one atomic unit.
+    3. Everything else (tables, headings, policy prose, etc.) becomes its own
+       unit and is handled by smart/sentence chunking.
+    4. Batch units into final chunks respecting chunk_size_chars.
+    5. Oversized single units are sub-chunked so nothing is ever dropped.
+    """
+    paragraphs = [p.strip() for p in re.split(r'\n{2,}', text) if p.strip()]
+
+    # --- Step 2 & 3: build atomic units, tracking which are Q+A pairs ---
+    units: List[str] = []
+    qa_flags: List[bool] = []   # True = this unit is a Q+A pair (must not be split)
+    i = 0
+    while i < len(paragraphs):
+        para = paragraphs[i]
+        # Peek ahead: is next paragraph the answer to this question?
+        if _para_is_question(para) and i + 1 < len(paragraphs) and _para_is_answer(paragraphs[i + 1]):
+            units.append(para + '\n\n' + paragraphs[i + 1])
+            qa_flags.append(True)
+            i += 2
+            continue
+        units.append(para)
+        qa_flags.append(False)
+        i += 1
+
+    # --- Step 4 & 5: batch units into chunks ---
+    chunks: List[str] = []
+    current: List[str] = []
+    current_len = 0
+
+    for unit, is_qa in zip(units, qa_flags):
+        unit_len = len(unit) + 2  # +2 for '\n\n' separator between units
+
+        if unit_len > chunk_size_chars:
+            # Q+A pairs: NEVER split — keep together even if oversized.
+            # The RAG context window (15 000 chars) can handle it.
+            if is_qa:
+                if current:
+                    chunks.append('\n\n'.join(current))
+                    current = []
+                    current_len = 0
+                chunks.append(unit)
+                continue
+
+            # Non-Q+A oversized unit (long table, policy section): sub-chunk it
+            # so content is not silently dropped.
+            if current:
+                chunks.append('\n\n'.join(current))
+                current = []
+                current_len = 0
+            sub = split_smart_chunks(unit, chunk_size_tokens, overlap_tokens)
+            chunks.extend(sub if sub else [unit])
+            continue
+
+        if current and current_len + unit_len > chunk_size_chars:
+            chunks.append('\n\n'.join(current))
+            # Overlap: carry the last unit forward for context continuity
+            last = current[-1]
+            if len(last) <= overlap_chars:
+                current = [last]
+                current_len = len(last)
+            else:
+                current = []
+                current_len = 0
+
+        current.append(unit)
+        current_len += unit_len
+
+    if current:
+        chunks.append('\n\n'.join(current))
+
+    return chunks
+
+
 def clean_text(text: str) -> str:
     """Clean text while preserving paragraph and sentence boundaries."""
     text = text.replace('\x00', '')
@@ -365,6 +494,39 @@ def clean_text(text: str) -> str:
     text = re.sub(r' *\n *', '\n', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r'[-_]{2,}', ' ', text)
+
+    # ── PDF structure restoration ────────────────────────────────────────────
+    # PDF extractors (even pdfplumber) can merge numbered section headings inline.
+    # Insert paragraph break before "N.M SectionTitle" or "N. SectionTitle" patterns
+    # that appear mid-text (preceded by any non-whitespace char including ".").
+    # This is generic — works for any policy/handbook/legal document.
+    text = re.sub(r'(?<=\S) (\d{1,2}\.\d+\s+[A-Z][a-zA-Z]{3,})', r'\n\n\1', text)
+
+    # ── Q&A paragraph recovery ────────────────────────────────────────────────
+    # PDF extractors often use single \n between Q&A pairs (not double \n), causing
+    # the entire page to appear as one giant paragraph. Promote answer and question
+    # markers to paragraph breaks so _chunk_mixed_content can pair them correctly.
+    # Handles: "Ans:", "Ans.", "Answer:", "A: " and "Q1.", "Q 1.", "QUE 1."
+    text = re.sub(r'(?<!\n)\n((?:Ans|Answer)\s*[.:]\s)', r'\n\n\1', text, flags=re.IGNORECASE)
+    text = re.sub(r'(?<!\n)\n(A\s*:\s)', r'\n\n\1', text)
+    text = re.sub(r'(?<!\n)\n(Q(?:ue)?\s*\d+\s*[.:])', r'\n\n\1', text, flags=re.IGNORECASE)
+
+    # ── Merged table-row recovery ─────────────────────────────────────────────
+    # When PDF extractors merge tabular rows onto one line, rows that contain a
+    # date-like token (1-Jan-26, 15/03/2026, 2026-01-01) end up as one long string.
+    # Insert a newline before each date so each row starts on its own line.
+    # Pattern covers:  DD-Mon-YY(YY)  |  DD/MM/YYYY  |  YYYY-MM-DD
+    text = re.sub(
+        r'(?<=[A-Za-z])\s+(\d{1,2}[-/][A-Z][a-z]{2}[-/]\d{2,4})',
+        r'\n\1',
+        text
+    )
+    text = re.sub(
+        r'(?<=[A-Za-z])\s+(\d{4}[-/]\d{2}[-/]\d{2})',
+        r'\n\1',
+        text
+    )
+
     return text.strip()
 
 
@@ -625,9 +787,10 @@ def chunk_text(
 
     text = clean_text(text)
 
+    chunk_size_chars = tokens_to_chars(chunk_size)
+    overlap_chars = tokens_to_chars(overlap)
+
     if chunking_type in {'legacy', 'fixed'}:
-        chunk_size_chars = tokens_to_chars(chunk_size)
-        overlap_chars = tokens_to_chars(overlap)
         flattened_text = re.sub(r'\s+', ' ', text).strip()
         chunks = split_by_separators(
             flattened_text,
@@ -636,7 +799,14 @@ def chunk_text(
             overlap_chars
         )
     else:
-        chunks = split_smart_chunks(text, chunk_size, overlap)
+        # Paragraph-level hybrid: handles Q&A pairs, tables, policy text, etc.
+        chunks = _chunk_mixed_content(
+            text,
+            chunk_size_chars,
+            overlap_chars,
+            chunk_size,
+            overlap,
+        )
 
     # Build chunk dictionaries
     result = []

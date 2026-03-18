@@ -29,5 +29,16 @@ OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-s
 # Qdrant Configuration
 QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://ask-api-dev.47billion.com")
+
+# Chunking Configuration
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "400"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
+
+# RAG Retrieval Configuration
+RAG_CONTEXT_SCORE_FLOOR = float(os.getenv("RAG_CONTEXT_SCORE_FLOOR", "0.4"))
+
+# Conversation history sent to LLM — keep only the last N messages.
+# 10 messages = 5 user+bot turns. Older turns add tokens without value for RAG.
+MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "20"))
 

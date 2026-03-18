@@ -69,3 +69,5 @@ urllib3==2.6.1
 uvicorn==0.30.0
 pydantic[email]==2.12.5
 openpyxl>=3.1.0
+pdfplumber>=0.7.0
+striprtf>=0.0.26
