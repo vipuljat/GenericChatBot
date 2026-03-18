@@ -2,7 +2,24 @@
 
 import re
 from typing import List, Dict, Any, Optional, Tuple
-from openai import OpenAI
+from google.api_core.exceptions import (
+    DeadlineExceeded,
+    GoogleAPICallError,
+    InvalidArgument,
+    PermissionDenied,
+    RetryError,
+    ServiceUnavailable,
+)
+from openai import (
+    APIConnectionError,
+    APIError,
+    APITimeoutError,
+    AuthenticationError,
+    BadRequestError,
+    OpenAI,
+    OpenAIError,
+    RateLimitError,
+)
 import google.generativeai as genai
 import config
 from utils.logging import log
@@ -14,6 +31,28 @@ from utils.logging import log
 
 EMBEDDING_COST_PER_1K_TOKENS = 0.0001  # text-embedding-ada-002
 AVG_CHARS_PER_TOKEN = 4               # ~4 chars per token (English)
+MIN_CHUNK_SIZE_TOKENS = 50
+MAX_CHUNK_SIZE_TOKENS = 2000
+SUPPORTED_CHUNKING_TYPES = {"smart", "legacy", "fixed"}
+
+OPENAI_EMBEDDING_EXCEPTIONS = (
+    APIConnectionError,
+    APIError,
+    APITimeoutError,
+    AuthenticationError,
+    BadRequestError,
+    OpenAIError,
+    RateLimitError,
+)
+
+GEMINI_EMBEDDING_EXCEPTIONS = (
+    DeadlineExceeded,
+    GoogleAPICallError,
+    InvalidArgument,
+    PermissionDenied,
+    RetryError,
+    ServiceUnavailable,
+)
 
 def estimate_embedding_cost(texts: List[str]) -> Dict[str, float]:
     """
@@ -39,34 +78,42 @@ _use_gemini: bool = False  # Changed to False - we'll set this properly during i
 _openai_model: str = None
 _gemini_model: str = None
 _initialized: bool = False  # Track if we've actually initialized
+_openai_initialized: bool = False
+_gemini_initialized: bool = False
 
 
 def _init_openai() -> bool:
     """Initialize OpenAI client. Returns True if successful."""
-    global _openai_client, _openai_model
+    global _openai_client, _openai_model, _openai_initialized
+    if _openai_initialized and _openai_client is not None and _openai_model:
+        return True
     try:
         if not config.OPENAI_API_KEY:
             return False
         _openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
         _openai_model = config.OPENAI_EMBEDDING_MODEL
+        _openai_initialized = True
         log.info(f"✓ Embedding: OpenAI ({_openai_model})")
         return True
-    except Exception as e:
+    except (AuthenticationError, BadRequestError, OpenAIError, TypeError, ValueError) as e:
         log.warning(f"OpenAI init failed: {e}")
         return False
 
 
 def _init_gemini() -> bool:
     """Initialize Gemini client. Returns True if successful."""
-    global _gemini_model
+    global _gemini_model, _gemini_initialized
+    if _gemini_initialized and _gemini_model:
+        return True
     try:
         if not hasattr(config, 'GEMINI_API_KEY') or not config.GEMINI_API_KEY:
             return False
         genai.configure(api_key=config.GEMINI_API_KEY)
         _gemini_model = getattr(config, 'GEMINI_EMBEDDING_MODEL', 'models/gemini-embedding-001')
+        _gemini_initialized = True
         log.info(f"✓ Embedding: Gemini ({_gemini_model})")
         return True
-    except Exception as e:
+    except (TypeError, ValueError, RuntimeError) as e:
         log.error(f"Gemini init failed: {e}")
         return False
 
@@ -95,6 +142,76 @@ def _ensure_initialized():
     raise RuntimeError("Neither OpenAI nor Gemini embedding services available")
 
 
+def _validate_embedding_vector(embedding: Any, provider: str) -> List[float]:
+    """Validate a provider response contains a usable embedding vector."""
+    if not isinstance(embedding, list) or not embedding:
+        raise ValueError(f"{provider} response missing embedding vector")
+
+    if not all(isinstance(value, (int, float)) for value in embedding):
+        raise ValueError(f"{provider} embedding vector contains non-numeric values")
+
+    return embedding
+
+
+def _extract_gemini_embedding(result: Any) -> List[float]:
+    """Extract and validate a Gemini embedding response."""
+    embedding = result.get("embedding") if isinstance(result, dict) else getattr(result, "embedding", None)
+    return _validate_embedding_vector(embedding, "Gemini")
+
+
+def _extract_openai_embedding(response: Any) -> List[float]:
+    """Extract and validate a single OpenAI embedding response."""
+    data = getattr(response, "data", None)
+    if not isinstance(data, list) or not data:
+        raise ValueError("OpenAI response missing data")
+
+    return _validate_embedding_vector(getattr(data[0], "embedding", None), "OpenAI")
+
+
+def _extract_openai_batch_embeddings(response: Any, expected_count: int) -> List[List[float]]:
+    """Extract and validate batch embeddings from OpenAI."""
+    data = getattr(response, "data", None)
+    if not isinstance(data, list) or len(data) != expected_count:
+        raise ValueError(
+            f"OpenAI batch response count mismatch: expected {expected_count}, got {len(data) if isinstance(data, list) else 'invalid'}"
+        )
+
+    embeddings: List[List[float]] = []
+    for index, item in enumerate(data):
+        embeddings.append(
+            _validate_embedding_vector(getattr(item, "embedding", None), f"OpenAI batch item {index}")
+        )
+
+    return embeddings
+
+
+def _generate_gemini_embedding(text: str) -> List[float]:
+    """Generate and validate a single Gemini embedding."""
+    result = genai.embed_content(
+        model=_gemini_model,
+        content=text,
+        task_type="retrieval_document"
+    )
+    return _extract_gemini_embedding(result)
+
+
+def _generate_gemini_embeddings_batch(texts: List[str]) -> List[List[float]]:
+    """Generate and validate a Gemini batch sequentially."""
+    embeddings: List[List[float]] = []
+    for text in texts:
+        embeddings.append(_generate_gemini_embedding(text))
+    return embeddings
+
+
+def _switch_to_gemini(reason: str) -> None:
+    """Enable Gemini fallback without redundant reinitialization."""
+    global _use_gemini
+    log.warning(reason)
+    _use_gemini = True
+    if not _init_gemini():
+        raise RuntimeError("Gemini fallback failed after OpenAI error")
+
+
 # ============================================================================
 # CORE EMBEDDING FUNCTIONS
 # ============================================================================
@@ -116,27 +233,43 @@ def generate_embedding(text: str) -> List[float]:
     )
     
     if _use_gemini:
-        result = genai.embed_content(
-            model=_gemini_model,
-            content=text,
-            task_type="retrieval_document"
-        )
-        return result['embedding']
-    else:
         try:
-            response = _openai_client.embeddings.create(
-                model=_openai_model,
-                input=text
-            )
-            return response.data[0].embedding
-        except Exception as e:
-            log.error(f"OpenAI embedding failed: {e}")
-            # Auto-fallback to Gemini
-            log.warning("Falling back to Gemini for embedding...")
-            _use_gemini = True
-            if not _init_gemini():
-                raise RuntimeError("Gemini fallback failed after OpenAI error")
-            return generate_embedding(text)
+            return _generate_gemini_embedding(text)
+        except GEMINI_EMBEDDING_EXCEPTIONS as e:
+            log.error(f"Gemini embedding failed: {e}")
+            raise RuntimeError("Gemini embedding request failed") from e
+        except ValueError as e:
+            log.error(f"Invalid Gemini embedding response: {e}")
+            raise RuntimeError("Gemini embedding response invalid") from e
+
+    try:
+        response = _openai_client.embeddings.create(
+            model=_openai_model,
+            input=text
+        )
+        return _extract_openai_embedding(response)
+    except OPENAI_EMBEDDING_EXCEPTIONS as e:
+        log.error(f"OpenAI embedding failed: {e}")
+        _switch_to_gemini("Falling back to Gemini for embedding...")
+        try:
+            return _generate_gemini_embedding(text)
+        except GEMINI_EMBEDDING_EXCEPTIONS as gemini_error:
+            log.error(f"Gemini embedding failed after fallback: {gemini_error}")
+            raise RuntimeError("Gemini fallback failed after OpenAI error") from gemini_error
+        except ValueError as gemini_error:
+            log.error(f"Invalid Gemini embedding response after fallback: {gemini_error}")
+            raise RuntimeError("Gemini fallback response invalid") from gemini_error
+    except (AttributeError, IndexError, TypeError, ValueError) as e:
+        log.error(f"Invalid OpenAI embedding response: {e}")
+        _switch_to_gemini("OpenAI returned an invalid embedding response. Falling back to Gemini...")
+        try:
+            return _generate_gemini_embedding(text)
+        except GEMINI_EMBEDDING_EXCEPTIONS as gemini_error:
+            log.error(f"Gemini embedding failed after invalid OpenAI response: {gemini_error}")
+            raise RuntimeError("Gemini fallback failed after invalid OpenAI response") from gemini_error
+        except ValueError as gemini_error:
+            log.error(f"Invalid Gemini embedding response after invalid OpenAI response: {gemini_error}")
+            raise RuntimeError("Gemini fallback response invalid") from gemini_error
 
 
 def generate_embeddings_batch(
@@ -173,39 +306,45 @@ def generate_embeddings_batch(
         )
         
         if _use_gemini:
-            # Gemini: process sequentially
-            for text in batch:
-                result = genai.embed_content(
-                    model=_gemini_model,
-                    content=text,
-                    task_type="retrieval_document"
-                )
-                all_embeddings.append(result['embedding'])
+            try:
+                all_embeddings.extend(_generate_gemini_embeddings_batch(batch))
+            except GEMINI_EMBEDDING_EXCEPTIONS as e:
+                log.error(f"Gemini batch embedding failed: {e}")
+                raise RuntimeError("Gemini batch embedding request failed") from e
+            except ValueError as e:
+                log.error(f"Invalid Gemini batch embedding response: {e}")
+                raise RuntimeError("Gemini batch embedding response invalid") from e
         else:
             try:
                 response = _openai_client.embeddings.create(
                     model=_openai_model,
                     input=batch
                 )
-                embeddings = [data.embedding for data in response.data]
+                embeddings = _extract_openai_batch_embeddings(response, len(batch))
                 all_embeddings.extend(embeddings)
 
-            except Exception as e:
+            except OPENAI_EMBEDDING_EXCEPTIONS as e:
                 log.error(f"OpenAI batch embedding failed: {e}")
-                log.warning("Falling back to Gemini for batch embedding...")
-
-                _use_gemini = True
-                if not _init_gemini():
-                    raise RuntimeError("Gemini fallback failed after OpenAI batch error")
-
-                # Retry this batch using Gemini
-                for text in batch:
-                    result = genai.embed_content(
-                        model=_gemini_model,
-                        content=text,
-                        task_type="retrieval_document"
-                    )
-                    all_embeddings.append(result["embedding"])
+                _switch_to_gemini("Falling back to Gemini for batch embedding...")
+                try:
+                    all_embeddings.extend(_generate_gemini_embeddings_batch(batch))
+                except GEMINI_EMBEDDING_EXCEPTIONS as gemini_error:
+                    log.error(f"Gemini batch embedding failed after fallback: {gemini_error}")
+                    raise RuntimeError("Gemini batch fallback failed after OpenAI error") from gemini_error
+                except ValueError as gemini_error:
+                    log.error(f"Invalid Gemini batch response after fallback: {gemini_error}")
+                    raise RuntimeError("Gemini batch fallback response invalid") from gemini_error
+            except (AttributeError, IndexError, TypeError, ValueError) as e:
+                log.error(f"Invalid OpenAI batch embedding response: {e}")
+                _switch_to_gemini("OpenAI returned an invalid batch response. Falling back to Gemini...")
+                try:
+                    all_embeddings.extend(_generate_gemini_embeddings_batch(batch))
+                except GEMINI_EMBEDDING_EXCEPTIONS as gemini_error:
+                    log.error(f"Gemini batch embedding failed after invalid OpenAI response: {gemini_error}")
+                    raise RuntimeError("Gemini batch fallback failed after invalid OpenAI response") from gemini_error
+                except ValueError as gemini_error:
+                    log.error(f"Invalid Gemini batch response after invalid OpenAI response: {gemini_error}")
+                    raise RuntimeError("Gemini batch fallback response invalid") from gemini_error
 
         
         log.info(f"✓ Batch {i//batch_size + 1} complete")
@@ -219,25 +358,27 @@ def generate_embeddings_batch(
 # ============================================================================
 
 def clean_text(text: str) -> str:
-    """Clean and normalize text more aggressively."""
-    # Remove multiple whitespaces, newlines, and special characters
-    text = re.sub(r'\s+', ' ', text)  # Replace all whitespace with single space
-    text = re.sub(r'[\n\r\t\f\v]+', ' ', text)  # Extra newline handling
-    text = text.replace('\x00', '')  # Null bytes
-    text = re.sub(r'[-_]{2,}', ' ', text)  # Multiple dashes/underscores
+    """Clean text while preserving paragraph and sentence boundaries."""
+    text = text.replace('\x00', '')
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    text = re.sub(r'[ \t\f\v]+', ' ', text)
+    text = re.sub(r' *\n *', '\n', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r'[-_]{2,}', ' ', text)
     return text.strip()
 
 
 def split_by_sentences(text: str) -> List[str]:
-    """Improved sentence splitting using regex for better semantic chunks."""
-    # Split on sentence boundaries: . ! ? followed by space or capital letter
-    sentence_end = re.compile(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|\!)\s')
+    """Split text on likely sentence boundaries while keeping punctuation."""
+    sentence_end = re.compile(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=[.!?])\s+')
     sentences = sentence_end.split(text)
     return [s.strip() for s in sentences if s.strip()]
 
 
 def split_by_chars(text: str, chunk_size: int, overlap: int) -> List[str]:
     """Character-level split with overlap (last resort)."""
+    chunk_size = max(1, int(chunk_size))
+    overlap = max(0, min(int(overlap), chunk_size - 1))
     chunks = []
     start = 0
     while start < len(text):
@@ -251,9 +392,18 @@ def split_by_separators(
     text: str,
     separators: List[str],
     chunk_size: int,
-    overlap: int
+    overlap: int,
+    depth: int = 0,
+    max_depth: Optional[int] = None
 ) -> List[str]:
     """Recursively split text using separator hierarchy with improved overlap handling."""
+    if max_depth is None:
+        max_depth = max(1, len(separators) + 2)
+
+    if depth >= max_depth:
+        log.warning("Chunk split depth limit reached; falling back to character splitting.")
+        return split_by_chars(text, chunk_size, overlap)
+
     if not separators or not separators[0]:
         return split_by_chars(text, chunk_size, overlap)
     
@@ -285,7 +435,14 @@ def split_by_separators(
             else:
                 current_len = 0
             
-            sub_chunks = split_by_separators(split, remaining_seps, chunk_size, overlap)
+            sub_chunks = split_by_separators(
+                split,
+                remaining_seps,
+                chunk_size,
+                overlap,
+                depth=depth + 1,
+                max_depth=max_depth
+            )
             chunks.extend(sub_chunks)
             continue
         
@@ -309,31 +466,178 @@ def split_by_separators(
     return [c for c in chunks if c]
 
 
+def normalize_chunk_settings(chunk_size: int, overlap: int) -> Tuple[int, int]:
+    """Ensure chunk settings are valid and overlap never exceeds chunk size."""
+    chunk_size = int(chunk_size)
+    overlap = max(0, int(overlap))
+
+    if chunk_size < MIN_CHUNK_SIZE_TOKENS:
+        log.warning(
+            f"Chunk size {chunk_size} is below the supported minimum of {MIN_CHUNK_SIZE_TOKENS}; using minimum."
+        )
+        chunk_size = MIN_CHUNK_SIZE_TOKENS
+    elif chunk_size > MAX_CHUNK_SIZE_TOKENS:
+        log.warning(
+            f"Chunk size {chunk_size} is above the supported maximum of {MAX_CHUNK_SIZE_TOKENS}; using maximum."
+        )
+        chunk_size = MAX_CHUNK_SIZE_TOKENS
+
+    if overlap >= chunk_size:
+        log.warning(
+            f"Chunk overlap {overlap} cannot be greater than or equal to chunk size {chunk_size}; reducing overlap."
+        )
+        overlap = max(0, chunk_size // 4)
+
+    max_recommended_overlap = max(0, chunk_size // 2)
+    if overlap > max_recommended_overlap:
+        log.warning(
+            f"Chunk overlap {overlap} is too large for chunk size {chunk_size}; capping at {max_recommended_overlap}."
+        )
+        overlap = max_recommended_overlap
+
+    return chunk_size, overlap
+
+
+def tokens_to_chars(token_count: int) -> int:
+    """Approximate token-based limits using the shared chars/token estimate."""
+    return max(1, int(token_count) * AVG_CHARS_PER_TOKEN)
+
+
+def split_into_semantic_units(text: str, chunk_size_chars: int) -> List[str]:
+    """Create sentence-aware units and recursively split very long sentences."""
+    paragraphs = [p.strip() for p in re.split(r'\n{2,}', text) if p.strip()]
+    if not paragraphs:
+        paragraphs = [text.strip()]
+
+    units: List[str] = []
+    fallback_separators = ["\n", "; ", ": ", ", ", " ", ""]
+
+    for paragraph_index, paragraph in enumerate(paragraphs):
+        sentences = split_by_sentences(paragraph) or [paragraph]
+        paragraph_units: List[str] = []
+
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+
+            if len(sentence) > chunk_size_chars:
+                paragraph_units.extend(
+                    split_by_separators(sentence, fallback_separators, chunk_size_chars, 0)
+                )
+            else:
+                paragraph_units.append(sentence)
+
+        for unit_index, unit in enumerate(paragraph_units):
+            unit = unit.strip()
+            if not unit:
+                continue
+
+            is_last_unit = unit_index == len(paragraph_units) - 1
+            has_more_paragraphs = paragraph_index < len(paragraphs) - 1
+
+            if is_last_unit and has_more_paragraphs:
+                units.append(f"{unit}\n\n")
+            elif is_last_unit:
+                units.append(unit)
+            else:
+                units.append(f"{unit} ")
+
+    return units
+
+
+def merge_units_with_overlap(
+    units: List[str],
+    chunk_size_chars: int,
+    overlap_chars: int
+) -> List[str]:
+    """Merge sentence-aware units into overlapping chunks."""
+    if not units:
+        return []
+
+    chunks: List[str] = []
+    current_units: List[str] = []
+    current_len = 0
+
+    for unit in units:
+        unit_len = len(unit)
+
+        if current_units and current_len + unit_len > chunk_size_chars:
+            chunk_text = ''.join(current_units).strip()
+            if chunk_text:
+                chunks.append(chunk_text)
+
+            while current_units and current_len > overlap_chars:
+                removed = current_units.pop(0)
+                current_len -= len(removed)
+
+            while current_units and current_len + unit_len > chunk_size_chars:
+                removed = current_units.pop(0)
+                current_len -= len(removed)
+
+        current_units.append(unit)
+        current_len += unit_len
+
+    if current_units:
+        chunk_text = ''.join(current_units).strip()
+        if chunk_text:
+            chunks.append(chunk_text)
+
+    return chunks
+
+
+def split_smart_chunks(text: str, chunk_size: int, overlap: int) -> List[str]:
+    """Sentence-aware recursive chunking with token-based limits."""
+    chunk_size, overlap = normalize_chunk_settings(chunk_size, overlap)
+    chunk_size_chars = tokens_to_chars(chunk_size)
+    overlap_chars = tokens_to_chars(overlap)
+
+    units = split_into_semantic_units(text, chunk_size_chars)
+    return merge_units_with_overlap(units, chunk_size_chars, overlap_chars)
+
+
+def normalize_chunking_type(chunking_type: Optional[str]) -> str:
+    """Normalize chunking type and warn when the requested value is unsupported."""
+    normalized = (chunking_type or getattr(config, 'CHUNKING_TYPE', 'smart')).strip().lower()
+    if normalized not in SUPPORTED_CHUNKING_TYPES:
+        log.warning(f"Unsupported chunking type '{normalized}'. Falling back to 'smart'.")
+        return "smart"
+    return normalized
+
+
 def chunk_text(
     text: str,
     metadata: Optional[Dict[str, Any]] = None,
-    chunk_size: int = 1200,  # Increased for better context preservation
-    overlap: int = 300  # Increased overlap for better context continuity
+    chunk_size: Optional[int] = None,
+    overlap: Optional[int] = None,
+    chunking_type: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Split text into overlapping chunks with metadata.
-    Improved for better semantic splitting.
+    Uses smart sentence-aware chunking by default.
     """
     if not text or not text.strip():
         return []
-    
+
+    chunk_size = int(chunk_size or getattr(config, 'CHUNK_SIZE', 400))
+    overlap = int(overlap if overlap is not None else getattr(config, 'CHUNK_OVERLAP', 100))
+    chunking_type = normalize_chunking_type(chunking_type)
+
     text = clean_text(text)
-    
-    # First, split into sentences for semantic chunks
-    sentences = split_by_sentences(text)
-    
-    # Separator hierarchy: now starting from paragraphs, then sentences (already split), words, chars
-    separators = ['\n\n', '\n', ' ', '']
-    
-    # Join sentences back and split using hierarchy
-    text = ' '.join(sentences)  # Rejoin for hierarchical splitting
-    chunks = split_by_separators(text, separators, chunk_size, overlap)
-    
+
+    if chunking_type in {'legacy', 'fixed'}:
+        chunk_size_chars = tokens_to_chars(chunk_size)
+        overlap_chars = tokens_to_chars(overlap)
+        flattened_text = re.sub(r'\s+', ' ', text).strip()
+        chunks = split_by_separators(
+            flattened_text,
+            ['\n\n', '\n', ' ', ''],
+            chunk_size_chars,
+            overlap_chars
+        )
+    else:
+        chunks = split_smart_chunks(text, chunk_size, overlap)
+
     # Build chunk dictionaries
     result = []
     for i, chunk in enumerate(chunks):
@@ -348,9 +652,12 @@ def chunk_text(
         }
         result.append(chunk_dict)
         # Log sample of chunk for debugging
-        log.info(f"Generated Chunk {i+1}/{len(chunks)}: {chunk[:200]}...") 
-    
-    log.info(f"Chunked text into {len(result)} chunks (size={chunk_size}, overlap={overlap})")
+        log.debug(f"Generated Chunk {i+1}/{len(chunks)}: {chunk[:200]}...") 
+
+    log.info(
+        f"Chunked text into {len(result)} chunks "
+        f"(type={chunking_type}, size={chunk_size}, overlap={overlap})"
+    )
     return result
 
 
@@ -361,8 +668,9 @@ def chunk_text(
 def process_document_for_embedding(
     text: str,
     metadata: Optional[Dict[str, Any]] = None,
-    chunk_size: int = 600,  # Smaller chunks for better retrieval
-    overlap: int = 150  # Better overlap
+    chunk_size: Optional[int] = None,
+    overlap: Optional[int] = None,
+    chunking_type: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Complete pipeline: chunk text and generate embeddings.
@@ -371,7 +679,7 @@ def process_document_for_embedding(
     Automatically logs all costs.
     """
     # Step 1: Chunk
-    chunks = chunk_text(text, metadata, chunk_size, overlap)
+    chunks = chunk_text(text, metadata, chunk_size, overlap, chunking_type)
     if not chunks:
         log.warning("No chunks generated from text")
         return []

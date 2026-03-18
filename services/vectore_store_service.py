@@ -116,6 +116,7 @@ def upsert_points(
     
     log.info(f"Upserting {len(points)} points to {sanitized_name}...")
     
+    
     for i in range(0, len(points), batch_size):
         batch = points[i:i + batch_size]
         client.upsert(collection_name=sanitized_name, points=batch)
