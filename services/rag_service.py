@@ -14,6 +14,43 @@ from utils.utilities import estimate_llm_cost
 genai.configure(api_key=config.GEMINI_API_KEY)
 
 
+def get_context_score_floor(min_score: float) -> float:
+    """
+    Require a stricter score than the raw retrieval threshold before we trust
+    chunks as usable context. This avoids treating weak matches as valid docs.
+    """
+    configured_floor = float(getattr(config, "RAG_CONTEXT_SCORE_FLOOR", 0.55))
+    return max(configured_floor, min_score + 0.15)
+
+
+def filter_relevant_chunks(
+    chunks: List[Dict[str, Any]],
+    min_score: float
+) -> List[Dict[str, Any]]:
+    """Keep only chunks strong enough to be treated as real context."""
+    required_score = get_context_score_floor(min_score)
+    relevant_chunks = [
+        chunk for chunk in chunks
+        if float(chunk.get("score", 0.0) or 0.0) >= required_score
+    ]
+
+    if not relevant_chunks:
+        best_score = max((float(chunk.get("score", 0.0) or 0.0) for chunk in chunks), default=0.0)
+        log.info(
+            f"Discarding retrieved chunks as low relevance. "
+            f"Best score={best_score:.3f}, required={required_score:.3f}"
+        )
+        return []
+
+    if len(relevant_chunks) != len(chunks):
+        log.info(
+            f"Using {len(relevant_chunks)}/{len(chunks)} chunks after relevance filtering "
+            f"(required score >= {required_score:.3f})"
+        )
+
+    return relevant_chunks
+
+
 # ============================================================================
 # CONTEXT RETRIEVAL (NO LLM)
 # ============================================================================
@@ -50,6 +87,11 @@ def retrieve_context(
         
         if not chunks:
             log.info("No relevant context found")
+            return "", []
+
+        chunks = filter_relevant_chunks(chunks, min_score)
+        if not chunks:
+            log.info("Retrieved chunks were too weak to use as context")
             return "", []
         
         # Format context and log chunks
