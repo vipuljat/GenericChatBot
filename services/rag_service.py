@@ -5,13 +5,420 @@ from typing import List, Dict, Optional, Any, Tuple
 import google.generativeai as genai
 import config
 from utils.logging import log
+from utils.retrieval_metadata import extract_content_tokens, normalize_match_text
 
 # Import our functional services
 from utils.embedding import generate_embedding
-from services.vectore_store_service import search_similar
+from services.vectore_store_service import search_lexical, search_similar
 from utils.utilities import estimate_llm_cost
 
 genai.configure(api_key=config.GEMINI_API_KEY)
+
+
+STRUCTURED_LOOKUP_HINTS = {"team", "member", "members", "lead", "leader", "manager", "head", "core", "department"}
+
+
+def get_query_bigrams(query: str) -> List[str]:
+    """Build normalized bigrams for phrase-sensitive reranking."""
+    tokens = extract_content_tokens(query)
+    return [
+        f"{tokens[index]} {tokens[index + 1]}"
+        for index in range(len(tokens) - 1)
+    ]
+
+
+def build_query_forms(query: str) -> List[str]:
+    """Build a small set of generic retrieval forms from the user query."""
+    base_query = " ".join((query or "").split())
+    if not base_query:
+        return []
+
+    content_tokens = extract_content_tokens(base_query)
+    variants = [base_query]
+
+    keyword_query = " ".join(content_tokens)
+    if keyword_query and keyword_query.lower() != base_query.lower():
+        variants.append(keyword_query)
+
+    deduped: List[str] = []
+    seen = set()
+    for variant in variants:
+        normalized = variant.casefold().strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(variant)
+        if len(deduped) >= 2:
+            break
+    return deduped
+
+
+def lexical_overlap_score(query: str, chunk_text: str) -> float:
+    """
+    Cheap lexical overlap score used as a light reranking signal after vector search.
+    """
+    query_tokens = {
+        token for token in normalize_match_text(query).split()
+        if len(token) >= 2 and token not in {"who", "what", "is", "the", "a", "an", "of", "for", "to"}
+    }
+    if not query_tokens:
+        return 0.0
+
+    chunk_tokens = set(normalize_match_text(chunk_text).split())
+    overlap_ratio = len(query_tokens & chunk_tokens) / len(query_tokens)
+    return min(overlap_ratio, 1.0)
+
+
+def phrase_match_score(query: str, chunk_text: str) -> float:
+    """Reward exact presence of the normalized content phrase in the chunk."""
+    normalized_query = " ".join(extract_content_tokens(query))
+    normalized_chunk = " ".join(extract_content_tokens(chunk_text))
+    if not normalized_query or not normalized_chunk:
+        return 0.0
+    return 1.0 if normalized_query in normalized_chunk else 0.0
+
+
+def bigram_overlap_score(query: str, chunk_text: str) -> float:
+    """Measure local phrase overlap to distinguish close semantic neighbors."""
+    query_bigrams = set(get_query_bigrams(query))
+    if not query_bigrams:
+        return 0.0
+
+    chunk_bigrams = set(get_query_bigrams(chunk_text))
+    if not chunk_bigrams:
+        return 0.0
+
+    return len(query_bigrams & chunk_bigrams) / len(query_bigrams)
+
+
+def keyword_density_score(query: str, chunk_text: str) -> float:
+    """
+    Reward chunks that mention more of the query's important terms, even when
+    the exact wording differs from the user's original sentence framing.
+    """
+    query_tokens = extract_content_tokens(query)
+    chunk_tokens = extract_content_tokens(chunk_text)
+    if not query_tokens or not chunk_tokens:
+        return 0.0
+
+    chunk_token_counts: Dict[str, int] = {}
+    for token in chunk_tokens:
+        chunk_token_counts[token] = chunk_token_counts.get(token, 0) + 1
+
+    matched = 0.0
+    for token in query_tokens:
+        if token in chunk_token_counts:
+            matched += min(1.0, 0.5 + (0.15 * chunk_token_counts[token]))
+
+    return min(1.0, matched / len(query_tokens))
+
+
+def is_structured_lookup_query(query: str) -> bool:
+    """Detect short title/team/member lookups that need stronger reranking."""
+    normalized_tokens = set(normalize_match_text(query).split())
+    if not normalized_tokens:
+        return False
+    if normalized_tokens & STRUCTURED_LOOKUP_HINTS:
+        return True
+    return len(extract_content_tokens(query)) <= 4
+
+
+def query_intent_flags(query_forms: List[str]) -> Dict[str, bool]:
+    """Infer high-level lookup intent from the normalized query variants."""
+    combined_text = " ".join(query_forms)
+    normalized_tokens = set(normalize_match_text(combined_text).split())
+    return {
+        "asks_team_members": bool({"member", "members", "team"} & normalized_tokens),
+        "asks_team_lead": bool({"lead", "leader", "manager", "head", "owner"} & normalized_tokens),
+        "asks_department_lookup": bool({"department", "team", "group"} & normalized_tokens),
+        "asks_core_team": "core" in normalized_tokens,
+    }
+
+
+def metadata_alignment_score(chunk: Dict[str, Any], intent_flags: Dict[str, bool]) -> float:
+    """Boost chunks whose indexed structure matches the query intent."""
+    score = 0.0
+
+    if intent_flags["asks_team_members"]:
+        if chunk.get("contains_team_members"):
+            score += 1.25
+        if chunk.get("contains_people_list"):
+            score += 0.45
+        if chunk.get("contains_team_lead") and not chunk.get("contains_team_members"):
+            score -= 0.2
+        if chunk.get("contains_leadership") and not chunk.get("contains_team_members"):
+            score -= 0.15
+        if not chunk.get("contains_people_list") and not chunk.get("contains_team_members"):
+            score -= 0.35
+        if chunk.get("contains_qa_pair"):
+            score -= 0.3
+
+    if intent_flags["asks_team_lead"]:
+        if chunk.get("contains_team_lead"):
+            score += 0.9
+        if chunk.get("contains_name_role_pairs"):
+            score += 0.4
+
+    if intent_flags["asks_department_lookup"] and chunk.get("contains_department"):
+        score += 0.35
+
+    if intent_flags["asks_core_team"] and chunk.get("contains_core_team"):
+        score += 0.9
+
+    if chunk.get("contains_leadership") and intent_flags["asks_team_lead"]:
+        score += 0.2
+
+    return max(-0.3, min(score, 1.4))
+
+
+def keyword_metadata_score(
+    query_forms: List[str],
+    chunk: Dict[str, Any]
+) -> float:
+    """Measure overlap between query terms and indexed retrieval keywords."""
+    chunk_keywords = set(chunk.get("retrieval_keywords") or [])
+    if not chunk_keywords:
+        return 0.0
+
+    best_score = 0.0
+    for variant in query_forms:
+        query_tokens = set(extract_content_tokens(variant))
+        if not query_tokens:
+            continue
+        best_score = max(best_score, len(query_tokens & chunk_keywords) / len(query_tokens))
+    return best_score
+
+
+def heading_overlap_score(
+    query_forms: List[str],
+    chunk: Dict[str, Any]
+) -> float:
+    """Measure overlap between query intent and the chunk's inferred heading."""
+    heading_tokens = set(chunk.get("section_heading_tokens") or [])
+    if not heading_tokens:
+        return 0.0
+
+    best_score = 0.0
+    for variant in query_forms:
+        query_tokens = set(extract_content_tokens(variant))
+        if not query_tokens:
+            continue
+        best_score = max(best_score, len(query_tokens & heading_tokens) / len(query_tokens))
+    return best_score
+
+
+def compute_idf_weights(
+    query_forms: List[str],
+    chunks: List[Dict[str, Any]]
+) -> Dict[str, float]:
+    """Compute lightweight IDF weights across the retrieved candidate set."""
+    all_query_tokens = {
+        token
+        for variant in query_forms
+        for token in extract_content_tokens(variant)
+    }
+    if not all_query_tokens or not chunks:
+        return {}
+
+    doc_count = len(chunks)
+    df: Dict[str, int] = {token: 0 for token in all_query_tokens}
+    for chunk in chunks:
+        chunk_tokens = set(extract_content_tokens(chunk.get("text", "")))
+        for token in all_query_tokens:
+            if token in chunk_tokens:
+                df[token] += 1
+
+    weights: Dict[str, float] = {}
+    for token, freq in df.items():
+        weights[token] = 1.0 + (doc_count / (1 + freq))
+    return weights
+
+
+def weighted_token_recall(
+    query: str,
+    chunk_text: str,
+    idf_weights: Dict[str, float]
+) -> float:
+    """Weighted recall favors rarer query terms inside the candidate set."""
+    query_tokens = set(extract_content_tokens(query))
+    chunk_tokens = set(extract_content_tokens(chunk_text))
+    if not query_tokens or not chunk_tokens:
+        return 0.0
+
+    total_weight = sum(idf_weights.get(token, 1.0) for token in query_tokens)
+    if total_weight <= 0:
+        return 0.0
+
+    matched_weight = sum(
+        idf_weights.get(token, 1.0)
+        for token in query_tokens
+        if token in chunk_tokens
+    )
+    return matched_weight / total_weight
+
+
+def rerank_chunk(
+    chunk: Dict[str, Any],
+    query_forms: List[str],
+    idf_weights: Dict[str, float],
+    max_raw_score: float,
+    min_raw_score: float
+) -> Dict[str, Any]:
+    """Combine vector and lexical signals into a stable reranking score."""
+    text = chunk.get("text", "")
+    raw_score = float(chunk.get("raw_score", chunk.get("score", 0.0)) or 0.0)
+    vector_score = (
+        (raw_score - min_raw_score) / (max_raw_score - min_raw_score)
+        if max_raw_score > min_raw_score else raw_score
+    )
+
+    best_weighted_recall = 0.0
+    best_keyword_density = 0.0
+    best_phrase_match = 0.0
+    best_bigram_overlap = 0.0
+    best_lexical_overlap = 0.0
+    intent_flags = query_intent_flags(query_forms)
+    metadata_score = metadata_alignment_score(chunk, intent_flags)
+    metadata_keyword_score = keyword_metadata_score(query_forms, chunk)
+    heading_score = heading_overlap_score(query_forms, chunk)
+
+    for query_variant in query_forms:
+        best_weighted_recall = max(
+            best_weighted_recall,
+            weighted_token_recall(query_variant, text, idf_weights)
+        )
+        best_keyword_density = max(
+            best_keyword_density,
+            keyword_density_score(query_variant, text)
+        )
+        best_phrase_match = max(
+            best_phrase_match,
+            phrase_match_score(query_variant, text)
+        )
+        best_bigram_overlap = max(
+            best_bigram_overlap,
+            bigram_overlap_score(query_variant, text)
+        )
+        best_lexical_overlap = max(
+            best_lexical_overlap,
+            lexical_overlap_score(query_variant, text)
+        )
+
+    structured_bonus = 0.08 if any(is_structured_lookup_query(q) for q in query_forms) else 0.0
+
+    final_score = (
+        (0.22 * vector_score) +
+        (0.22 * best_weighted_recall) +
+        (0.14 * best_keyword_density) +
+        (0.08 * best_bigram_overlap) +
+        (0.07 * best_phrase_match) +
+        (0.03 * best_lexical_overlap) +
+        (0.12 * metadata_keyword_score) +
+        (0.09 * heading_score) +
+        (0.12 * metadata_score)
+    )
+    if best_phrase_match > 0 or best_bigram_overlap > 0.5:
+        final_score += structured_bonus
+
+    reranked_chunk = {
+        **chunk,
+        "vector_score": vector_score,
+        "weighted_recall": best_weighted_recall,
+        "keyword_density": best_keyword_density,
+        "phrase_match": best_phrase_match,
+        "bigram_overlap": best_bigram_overlap,
+        "lexical_overlap": best_lexical_overlap,
+        "metadata_score": metadata_score,
+        "metadata_keyword_score": metadata_keyword_score,
+        "heading_score": heading_score,
+        "score": final_score,
+    }
+    return reranked_chunk
+
+
+def rerank_retrieved_chunks(
+    chunks: List[Dict[str, Any]],
+    query_forms: List[str],
+    top_k: int
+) -> List[Dict[str, Any]]:
+    """Rerank vector candidates using lexical and phrase-level evidence."""
+    if not chunks:
+        return []
+
+    idf_weights = compute_idf_weights(query_forms, chunks)
+    raw_scores = [
+        float(chunk.get("raw_score", chunk.get("score", 0.0)) or 0.0)
+        for chunk in chunks
+    ]
+    max_raw_score = max(raw_scores) if raw_scores else 0.0
+    min_raw_score = min(raw_scores) if raw_scores else 0.0
+
+    reranked = [
+        rerank_chunk(chunk, query_forms, idf_weights, max_raw_score, min_raw_score)
+        for chunk in chunks
+    ]
+
+    reranked.sort(
+        key=lambda chunk: (
+            float(chunk.get("score", 0.0) or 0.0),
+            float(chunk.get("weighted_recall", 0.0) or 0.0),
+            float(chunk.get("raw_score", 0.0) or 0.0),
+        ),
+        reverse=True
+    )
+    return reranked[:top_k]
+
+
+def merge_retrieved_chunks(
+    query_forms: List[str],
+    retrieval_results: List[Tuple[str, str, List[Dict[str, Any]]]],
+    top_k: int
+) -> List[Dict[str, Any]]:
+    """Merge dense and lexical hits before reranking."""
+    merged: Dict[Tuple[Any, Any, str], Dict[str, Any]] = {}
+
+    for retrieval_source, query_form, chunks in retrieval_results:
+        for chunk in chunks:
+            text = chunk.get("text", "")
+            key = (
+                chunk.get("source_file"),
+                chunk.get("chunk_index"),
+                text.strip(),
+            )
+            lexical_score = max(
+                lexical_overlap_score(variant, text)
+                for variant in query_forms
+            ) if text else 0.0
+            source_bonus = 0.03 if retrieval_source == "lexical" else 0.0
+            boosted_score = float(chunk.get("score", 0.0) or 0.0) + min(0.05, lexical_score * 0.05) + source_bonus
+
+            if key not in merged:
+                merged[key] = {
+                    **chunk,
+                    "raw_score": float(chunk.get("score", 0.0) or 0.0),
+                    "score": boosted_score,
+                    "matched_queries": [query_form],
+                    "retrieval_sources": [retrieval_source],
+                }
+                continue
+
+            existing = merged[key]
+            existing["raw_score"] = max(existing.get("raw_score", 0.0), float(chunk.get("score", 0.0) or 0.0))
+            if boosted_score > float(existing.get("score", 0.0) or 0.0):
+                existing.update({
+                    **chunk,
+                    "raw_score": existing["raw_score"],
+                    "score": boosted_score,
+                    "matched_queries": existing.get("matched_queries", []),
+                    "retrieval_sources": existing.get("retrieval_sources", []),
+                })
+            if query_form not in existing["matched_queries"]:
+                existing["matched_queries"].append(query_form)
+            if retrieval_source not in existing["retrieval_sources"]:
+                existing["retrieval_sources"].append(retrieval_source)
+
+    merged_chunks = list(merged.values())
+    return rerank_retrieved_chunks(merged_chunks, query_forms, top_k)
 
 
 def get_context_score_floor(min_score: float) -> float:
@@ -20,7 +427,26 @@ def get_context_score_floor(min_score: float) -> float:
     chunks as usable context. This avoids treating weak matches as valid docs.
     """
     configured_floor = float(getattr(config, "RAG_CONTEXT_SCORE_FLOOR", 0.4))
-    return max(configured_floor, min_score + 0.05)
+    return max(configured_floor, min_score + 0.02)
+
+
+def has_confident_context(chunks: List[Dict[str, Any]], min_score: float) -> bool:
+    """
+    Guard against weak, scattered retrieval results being treated as grounded context.
+    """
+    if not chunks:
+        return False
+
+    top_score = float(chunks[0].get("score", 0.0) or 0.0)
+    if top_score < get_context_score_floor(min_score):
+        return False
+
+    if len(chunks) == 1:
+        return True
+
+    second_score = float(chunks[1].get("score", 0.0) or 0.0)
+    score_gap = top_score - second_score
+    return score_gap >= 0.03 or top_score >= 0.72
 
 
 def filter_relevant_chunks(
@@ -71,19 +497,35 @@ def retrieve_context(
     Logs embedding cost and prints retrieved chunks for debugging.
     """
     try:
-        # Generate query embedding ONCE with cost logging
+        # Hybrid retrieval: dense semantic search plus lexical search.
         log.info(f"🔍 Retrieving context for: {query[:60]}...")
-        query_vector = generate_embedding(query)  # Cost logged inside
-        
-        # Search vector store
+        query_forms = build_query_forms(query)
+        log.info(f"Query forms for retrieval: {query_forms}")
+
         filters = {'document_type': document_type} if document_type else None
-        chunks = search_similar(
+        retrieval_results: List[Tuple[str, str, List[Dict[str, Any]]]] = []
+        search_floor = max(min_score - 0.12, 0.18)
+
+        for query_form in query_forms:
+            query_vector = generate_embedding(query_form)  # Cost logged inside
+            chunks = search_similar(
+                collection_name=chatbot_name,
+                query_vector=query_vector,
+                limit=max(top_k * 2, top_k),
+                min_score=search_floor,
+                filters=filters
+            )
+            retrieval_results.append(("dense", query_form, chunks))
+
+        lexical_chunks = search_lexical(
             collection_name=chatbot_name,
-            query_vector=query_vector,
-            limit=top_k,
-            min_score=min_score,
+            query_text=query,
+            limit=max(top_k * 3, 12),
             filters=filters
         )
+        retrieval_results.append(("lexical", query, lexical_chunks))
+
+        chunks = merge_retrieved_chunks(query_forms, retrieval_results, top_k)
         
         if not chunks:
             log.info("No relevant context found")
@@ -92,6 +534,9 @@ def retrieve_context(
         chunks = filter_relevant_chunks(chunks, min_score)
         if not chunks:
             log.info("Retrieved chunks were too weak to use as context")
+            return "", []
+        if not has_confident_context(chunks, min_score):
+            log.info("Retrieved chunks were not confident enough to use as grounded context")
             return "", []
         
         # Format context and log chunks
@@ -113,8 +558,13 @@ def retrieve_context(
                 break
             
             # Log each retrieved chunk for debugging
-            log.info(f"Retrieved Chunk {idx}/{len(chunks)} (Score: {chunk.get('score', 0):.3f}):")
-            log.info(f"{chunk_text[:500]}..." if len(chunk_text) > 500 else chunk_text)
+            matched_queries = ", ".join(chunk.get("matched_queries", []))
+            log.info(
+                f"Retrieved Chunk {idx}/{len(chunks)} "
+                f"(Score: {chunk.get('score', 0):.3f}, Raw: {chunk.get('raw_score', chunk.get('score', 0)):.3f}, "
+                f"Matched by: {matched_queries})"
+            )
+            log.info(f"{chunk_text[:2000]}..." if len(chunk_text) > 500 else chunk_text)
             log.info("---")  # Separator for clarity
             
             context_parts.append(chunk_text)
@@ -303,10 +753,16 @@ STRUCTURED DATA READING RULE (Critical — read before answering any role/person
 Documents often list people and their roles in structured formats such as:
   • "Vishakha Atre – HR Head"
   • "Name : Title" or "Name — Role"
+  • "Department / Team" followed by "Team Members:" or "Team Lead:"
   • Bullet/numbered lists pairing names with roles or departments
 You MUST treat these as direct factual statements. "Vishakha Atre – HR Head" is the same as saying "Vishakha Atre is the HR Head."
 If asked "who is the HR head?", the answer is "Vishakha Atre" — do NOT say you lack that information.
 Apply this to ALL name–role, name–title, and name–department associations in the context.
+
+TEAM MEMBERSHIP RULE (Critical for "who is in X team/department?" questions):
+If the context contains a department or team section with "Team Members:" or a roster/list of people, you MUST answer with the full list of members from that section.
+Do NOT replace the team roster with a contact person, escalation path, or manager unless the question specifically asks who leads or manages the team.
+If both a roster and a contact/escalation sentence appear in context, the roster is the answer for team-membership questions.
 
 3. HANDLING SPECIFIC EDGE CASES:
 
@@ -356,6 +812,11 @@ Apply this to ALL name–role, name–title, and name–department associations 
       - Scan the entire context for "Name – Role", "Name: Role", or any structured list pairing names with titles
       - Answer directly with the name if the role appears anywhere in the context
       - NEVER say "I don't have information" if the role is present in a structured list in the context
+
+   l) TEAM/DEPARTMENT MEMBERSHIP LOOKUP ("who is in HR team?", "who are the admin team members?", "who is in AI/ML team?"):
+      - Prefer explicit department/team sections and "Team Members:" rosters over general policy or contact information
+      - List all members found in that section
+      - If only a team lead is present and no roster is present, say that only the lead is available in the documents
 
 4. TONE AND LANGUAGE RULES:
    - Be professional but friendly

@@ -12,6 +12,7 @@ from qdrant_client.models import (
 )
 from stateful_services.database import qdrant_manager
 from utils.logging import log
+from utils.retrieval_metadata import extract_content_tokens
 import re
 
 
@@ -273,11 +274,118 @@ def search_similar(
                 'document_type': payload.get('document_type'),
                 'chunk_index': payload.get('chunk_index'),
                 'score': float(point.score),
-                'metadata': payload
+                'metadata': payload,
+                'retrieval_keywords': payload.get('retrieval_keywords', []),
+                'section_heading': payload.get('section_heading'),
+                'section_heading_tokens': payload.get('section_heading_tokens', []),
+                'section_labels': payload.get('section_labels', []),
+                'contains_team_members': bool(payload.get('contains_team_members')),
+                'contains_team_lead': bool(payload.get('contains_team_lead')),
+                'contains_leadership': bool(payload.get('contains_leadership')),
+                'contains_department': bool(payload.get('contains_department')),
+                'contains_core_team': bool(payload.get('contains_core_team')),
+                'contains_qa_pair': bool(payload.get('contains_qa_pair')),
+                'contains_name_role_pairs': bool(payload.get('contains_name_role_pairs')),
+                'contains_people_list': bool(payload.get('contains_people_list')),
             })
     
     log.info(f"Found {len(chunks)} chunks (score >= {min_score}) from {sanitized_name}")
     return chunks
+
+
+def search_lexical(
+    collection_name: str,
+    query_text: str,
+    limit: int = 10,
+    filters: Optional[Dict[str, str]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Lightweight lexical retrieval over chunk payloads.
+    This complements dense retrieval for short or structured lookup queries.
+    """
+    client = qdrant_manager.get_client()
+    sanitized_name = sanitize_collection_name(collection_name)
+
+    existing = [c.name for c in client.get_collections().collections]
+    if sanitized_name not in existing:
+        log.warning(f"Collection not found: {sanitized_name}")
+        return []
+
+    query_tokens = set(extract_content_tokens(query_text))
+    if not query_tokens:
+        return []
+
+    scroll_filter = None
+    if filters:
+        conditions = [
+            FieldCondition(key=k, match=MatchValue(value=v))
+            for k, v in filters.items()
+        ]
+        scroll_filter = Filter(must=conditions)
+
+    lexical_hits: List[Dict[str, Any]] = []
+    offset = None
+    batch_size = 128
+
+    while True:
+        results, offset = client.scroll(
+            collection_name=sanitized_name,
+            scroll_filter=scroll_filter,
+            limit=batch_size,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False
+        )
+
+        for point in results:
+            payload = point.payload or {}
+            chunk_keywords = set(payload.get("retrieval_keywords") or [])
+            heading_tokens = set(payload.get("section_heading_tokens") or [])
+            chunk_text = payload.get("text", "") or ""
+            chunk_tokens = set(extract_content_tokens(chunk_text))
+            token_space = chunk_keywords | chunk_tokens | heading_tokens
+            if not token_space:
+                continue
+
+            recall = len(query_tokens & token_space) / len(query_tokens)
+            if recall <= 0:
+                continue
+
+            phrase = " ".join(extract_content_tokens(query_text))
+            normalized_chunk = " ".join(extract_content_tokens(chunk_text))
+            phrase_bonus = 0.25 if phrase and phrase in normalized_chunk else 0.0
+            people_bonus = 0.1 if payload.get("contains_people_list") else 0.0
+            lexical_score = min(1.0, recall + phrase_bonus + people_bonus)
+
+            lexical_hits.append({
+                "text": chunk_text,
+                "source_file": payload.get("source_file"),
+                "document_type": payload.get("document_type"),
+                "chunk_index": payload.get("chunk_index"),
+                "score": lexical_score,
+                "raw_score": lexical_score,
+                "metadata": payload,
+                "retrieval_keywords": payload.get("retrieval_keywords", []),
+                "section_heading": payload.get("section_heading"),
+                "section_heading_tokens": payload.get("section_heading_tokens", []),
+                "section_labels": payload.get("section_labels", []),
+                "contains_team_members": bool(payload.get("contains_team_members")),
+                "contains_team_lead": bool(payload.get("contains_team_lead")),
+                "contains_leadership": bool(payload.get("contains_leadership")),
+                "contains_department": bool(payload.get("contains_department")),
+                "contains_core_team": bool(payload.get("contains_core_team")),
+                "contains_qa_pair": bool(payload.get("contains_qa_pair")),
+                "contains_name_role_pairs": bool(payload.get("contains_name_role_pairs")),
+                "contains_people_list": bool(payload.get("contains_people_list")),
+            })
+
+        if offset is None:
+            break
+
+    lexical_hits.sort(key=lambda chunk: float(chunk.get("score", 0.0) or 0.0), reverse=True)
+    hits = lexical_hits[:limit]
+    log.info(f"Found {len(hits)} lexical chunks from {sanitized_name}")
+    return hits
 
 
 def delete_collection(collection_name: str) -> bool:
