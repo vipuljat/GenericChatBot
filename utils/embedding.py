@@ -74,7 +74,7 @@ def estimate_embedding_cost(texts: List[str]) -> Dict[str, float]:
 # ============================================================================
 
 _openai_client: Optional[OpenAI] = None
-_use_gemini: bool = False  # Changed to False - we'll set this properly during init
+_use_gemini: bool = True  # Gemini-only mode; OpenAI embedding disabled
 _openai_model: str = None
 _gemini_model: str = None
 _initialized: bool = False  # Track if we've actually initialized
@@ -119,27 +119,24 @@ def _init_gemini() -> bool:
 
 
 def _ensure_initialized():
-    """Ensure embedding client is initialized with fallback."""
-    global _openai_client, _use_gemini, _initialized
-    
-    # If already initialized, skip
+    """Ensure Gemini embedding client is initialized."""
+    global _use_gemini, _initialized
+
     if _initialized:
         return
-    
-    # Try OpenAI first
-    if _init_openai():
-        _use_gemini = False
-        _initialized = True
-        return
-    
-    # Fallback to Gemini
-    log.warning("OpenAI unavailable, falling back to Gemini...")
+
+    # OpenAI embedding disabled — Gemini only
+    # if _init_openai():
+    #     _use_gemini = False
+    #     _initialized = True
+    #     return
+
     if _init_gemini():
         _use_gemini = True
         _initialized = True
         return
-    
-    raise RuntimeError("Neither OpenAI nor Gemini embedding services available")
+
+    raise RuntimeError("Gemini embedding service unavailable")
 
 
 def _validate_embedding_vector(embedding: Any, provider: str) -> List[float]:
@@ -517,6 +514,22 @@ def _chunk_mixed_content(
     5. Oversized single units are sub-chunked so nothing is ever dropped.
     """
     paragraphs = [p.strip() for p in re.split(r'\n{2,}', text) if p.strip()]
+
+    # If a paragraph is larger than the chunk size AND contains heading-like
+    # lines when split on single \n, re-split it so section headings are visible
+    # to the heading detector below.  This handles PDFs where the extractor
+    # uses single \n between structured sections instead of blank lines.
+    expanded: List[str] = []
+    for para in paragraphs:
+        if len(para) <= chunk_size_chars:
+            expanded.append(para)
+            continue
+        lines = [ln.strip() for ln in para.split('\n') if ln.strip()]
+        if any(_is_short_heading_like(ln) for ln in lines):
+            expanded.extend(lines)
+        else:
+            expanded.append(para)
+    paragraphs = expanded
 
     # --- Step 2 & 3: build atomic units, tracking which must remain atomic ---
     units: List[str] = []
