@@ -38,6 +38,15 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
 # RAG Retrieval Configuration
 RAG_CONTEXT_SCORE_FLOOR = float(os.getenv("RAG_CONTEXT_SCORE_FLOOR", "0.4"))
 
+# Multi-Query Expansion — use LLM to generate vocabulary-variant queries
+ENABLE_QUERY_EXPANSION = os.getenv("ENABLE_QUERY_EXPANSION", "true").lower() == "true"
+QUERY_EXPANSION_MODEL = os.getenv("QUERY_EXPANSION_MODEL", "gemini-2.0-flash")
+QUERY_EXPANSION_MAX_VARIANTS = int(os.getenv("QUERY_EXPANSION_MAX_VARIANTS", "3"))
+
+# HyDE (Hypothetical Document Embeddings) — embed a generated answer instead of the raw query
+ENABLE_HYDE = os.getenv("ENABLE_HYDE", "true").lower() == "true"
+HYDE_MODEL = os.getenv("HYDE_MODEL", "gemini-2.0-flash")
+
 # Conversation history sent to LLM — keep only the last N messages.
 # 10 messages = 5 user+bot turns. Older turns add tokens without value for RAG.
 MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "20"))

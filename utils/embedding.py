@@ -74,7 +74,7 @@ def estimate_embedding_cost(texts: List[str]) -> Dict[str, float]:
 # ============================================================================
 
 _openai_client: Optional[OpenAI] = None
-_use_gemini: bool = False  # Changed to False - we'll set this properly during init
+_use_gemini: bool = True  # Gemini-only mode; OpenAI embedding disabled
 _openai_model: str = None
 _gemini_model: str = None
 _initialized: bool = False  # Track if we've actually initialized
@@ -119,27 +119,24 @@ def _init_gemini() -> bool:
 
 
 def _ensure_initialized():
-    """Ensure embedding client is initialized with fallback."""
-    global _openai_client, _use_gemini, _initialized
-    
-    # If already initialized, skip
+    """Ensure Gemini embedding client is initialized."""
+    global _use_gemini, _initialized
+
     if _initialized:
         return
-    
-    # Try OpenAI first
-    if _init_openai():
-        _use_gemini = False
-        _initialized = True
-        return
-    
-    # Fallback to Gemini
-    log.warning("OpenAI unavailable, falling back to Gemini...")
+
+    # OpenAI embedding disabled — Gemini only
+    # if _init_openai():
+    #     _use_gemini = False
+    #     _initialized = True
+    #     return
+
     if _init_gemini():
         _use_gemini = True
         _initialized = True
         return
-    
-    raise RuntimeError("Neither OpenAI nor Gemini embedding services available")
+
+    raise RuntimeError("Gemini embedding service unavailable")
 
 
 def _validate_embedding_vector(embedding: Any, provider: str) -> List[float]:
@@ -397,6 +394,103 @@ def _para_is_answer(para: str) -> bool:
     return bool(_QA_ANSWER_MARKER.match(para))
 
 
+STRUCTURED_SECTION_HINTS = (
+    "team breakdown",
+    "leadership team",
+    "human resources",
+    "administration",
+    "finance",
+    "backend development",
+    "frontend development",
+    "quality assurance",
+    "project management",
+    "sales & marketing",
+    "ux design",
+    "us staffing",
+    "data analytics",
+    "devops",
+    "ai/ml",
+    "machine learning",
+    "core teams",
+    "modern team structure",
+    "team members",
+    "team lead",
+)
+
+
+def _is_short_heading_like(para: str) -> bool:
+    """Best-effort detection for extracted section headings."""
+    normalized = re.sub(r"\s+", " ", para.strip())
+    if not normalized or len(normalized) > 120:
+        return False
+    if "\n" in normalized:
+        return False
+
+    lowered = normalized.lower()
+    if any(hint in lowered for hint in STRUCTURED_SECTION_HINTS):
+        return True
+
+    words = normalized.split()
+    if not words or len(words) > 10:
+        return False
+
+    title_like = sum(1 for word in words if word[:1].isupper() or word.isupper())
+    return title_like >= max(1, len(words) - 1) and not normalized.endswith((".", "?", "!", ":"))
+
+
+def _is_structured_detail_para(para: str) -> bool:
+    """Detect short roster/detail paragraphs that belong under a heading."""
+    lowered = para.strip().lower()
+    if not lowered:
+        return False
+    return (
+        lowered.startswith("team members")
+        or lowered.startswith("team member")
+        or lowered.startswith("team lead")
+        or lowered.startswith("members:")
+        or lowered.startswith("responsible for")
+        or lowered.startswith("focuses on")
+        or lowered.startswith("works on")
+        or lowered.startswith("handles")
+        or lowered.startswith("manages")
+        or lowered.startswith("coordinates")
+        or lowered.startswith("designs")
+        or lowered.startswith("develops")
+        or lowered.startswith("ensures")
+        or lowered.startswith("the human resources department")
+        or lowered.startswith("the finance department")
+        or lowered.startswith("the administration department")
+        or lowered.startswith("in addition to core teams")
+        or bool(re.match(r"^[•\-\*]\s+[A-Z]", para.strip()))
+    )
+
+
+def _collect_structured_section(paragraphs: List[str], start_index: int) -> Tuple[str, int]:
+    """
+    Collect a heading plus its immediate roster/detail paragraphs into one atomic
+    unit so org-structure sections remain retrievable as standalone chunks.
+    """
+    collected = [paragraphs[start_index].strip()]
+    index = start_index + 1
+
+    while index < len(paragraphs):
+        candidate = paragraphs[index].strip()
+        if not candidate:
+            break
+        if _is_short_heading_like(candidate) and not _is_structured_detail_para(candidate):
+            break
+        if not _is_structured_detail_para(candidate) and len(candidate) > 500:
+            break
+
+        collected.append(candidate)
+        index += 1
+
+        if sum(len(part) for part in collected) > 2200:
+            break
+
+    return "\n\n".join(collected), index
+
+
 def _chunk_mixed_content(
     text: str,
     chunk_size_chars: int,
@@ -421,20 +515,42 @@ def _chunk_mixed_content(
     """
     paragraphs = [p.strip() for p in re.split(r'\n{2,}', text) if p.strip()]
 
-    # --- Step 2 & 3: build atomic units, tracking which are Q+A pairs ---
+    # If a paragraph is larger than the chunk size AND contains heading-like
+    # lines when split on single \n, re-split it so section headings are visible
+    # to the heading detector below.  This handles PDFs where the extractor
+    # uses single \n between structured sections instead of blank lines.
+    expanded: List[str] = []
+    for para in paragraphs:
+        if len(para) <= chunk_size_chars:
+            expanded.append(para)
+            continue
+        lines = [ln.strip() for ln in para.split('\n') if ln.strip()]
+        if any(_is_short_heading_like(ln) for ln in lines):
+            expanded.extend(lines)
+        else:
+            expanded.append(para)
+    paragraphs = expanded
+
+    # --- Step 2 & 3: build atomic units, tracking which must remain atomic ---
     units: List[str] = []
-    qa_flags: List[bool] = []   # True = this unit is a Q+A pair (must not be split)
+    atomic_flags: List[bool] = []   # True = this unit should stand alone if possible
     i = 0
     while i < len(paragraphs):
         para = paragraphs[i]
         # Peek ahead: is next paragraph the answer to this question?
         if _para_is_question(para) and i + 1 < len(paragraphs) and _para_is_answer(paragraphs[i + 1]):
             units.append(para + '\n\n' + paragraphs[i + 1])
-            qa_flags.append(True)
+            atomic_flags.append(True)
             i += 2
             continue
+        if _is_short_heading_like(para):
+            structured_unit, next_index = _collect_structured_section(paragraphs, i)
+            units.append(structured_unit)
+            atomic_flags.append(True)
+            i = next_index
+            continue
         units.append(para)
-        qa_flags.append(False)
+        atomic_flags.append(False)
         i += 1
 
     # --- Step 4 & 5: batch units into chunks ---
@@ -442,21 +558,22 @@ def _chunk_mixed_content(
     current: List[str] = []
     current_len = 0
 
-    for unit, is_qa in zip(units, qa_flags):
+    for unit, is_atomic in zip(units, atomic_flags):
         unit_len = len(unit) + 2  # +2 for '\n\n' separator between units
 
+        if is_atomic and current:
+            chunks.append('\n\n'.join(current))
+            current = []
+            current_len = 0
+
         if unit_len > chunk_size_chars:
-            # Q+A pairs: NEVER split — keep together even if oversized.
+            # Q+A pairs / structured sections: NEVER split — keep together even if oversized.
             # The RAG context window (15 000 chars) can handle it.
-            if is_qa:
-                if current:
-                    chunks.append('\n\n'.join(current))
-                    current = []
-                    current_len = 0
+            if is_atomic:
                 chunks.append(unit)
                 continue
 
-            # Non-Q+A oversized unit (long table, policy section): sub-chunk it
+            # Non-atomic oversized unit (long table, policy section): sub-chunk it
             # so content is not silently dropped.
             if current:
                 chunks.append('\n\n'.join(current))
@@ -464,6 +581,10 @@ def _chunk_mixed_content(
                 current_len = 0
             sub = split_smart_chunks(unit, chunk_size_tokens, overlap_tokens)
             chunks.extend(sub if sub else [unit])
+            continue
+
+        if is_atomic:
+            chunks.append(unit)
             continue
 
         if current and current_len + unit_len > chunk_size_chars:

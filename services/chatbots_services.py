@@ -12,6 +12,7 @@ from stateful_services.database import get_db
 from stateful_services.db_schema import Answer, Chatbot, ChatbotAccess, ChatbotPermission, Employee, PeopleAnalyzer, Question
 from utils.document_service import extract_text_from_document, get_file_extension
 from utils.logging import log
+from utils.retrieval_metadata import infer_chunk_retrieval_metadata
 import os
 import httpx
 # Import functional services
@@ -122,6 +123,7 @@ def process_documents_background(
                 for chunk in chunks_with_embeddings:
                     # Use UUID for point ID to guarantee uniqueness
                     point_id = str(uuid.uuid4())
+                    retrieval_metadata = infer_chunk_retrieval_metadata(chunk['text'])
                     
                     point = PointStruct(
                         id=point_id,  # UUID string instead of sequential int
@@ -133,7 +135,8 @@ def process_documents_background(
                             'document_type': doc_type,
                             'chunk_index': chunk['chunk_index'],
                             'total_chunks': chunk['total_chunks'],
-                            'char_count': chunk['char_count']
+                            'char_count': chunk['char_count'],
+                            **retrieval_metadata,
                         }
                     )
                     all_points.append(point)
