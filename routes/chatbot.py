@@ -1,4 +1,5 @@
 from typing import List, Optional, Dict, Any
+import asyncio
 import uuid
 import json
 from fastapi import APIRouter, Depends, Request, UploadFile, File, Form, BackgroundTasks, HTTPException, Query, Body
@@ -396,7 +397,8 @@ async def query_chatbot_endpoint(
             except ValueError:
                 pass
         
-        result = quiz_query_service(
+        result = await asyncio.to_thread(
+            quiz_query_service,
             db=db,
             chatbot_id=chatbot_id,
             chatbot_name=chatbot.chatbot_name,
@@ -416,7 +418,8 @@ async def query_chatbot_endpoint(
 
     else:
         # General RAG mode (costs logged inside)
-        result = generate_rag_response(
+        result = await asyncio.to_thread(
+            generate_rag_response,
             query=request.query,
             chatbot_name=chatbot.chatbot_name,
             chatbot_instructions=request.instructions or chatbot.instruction,

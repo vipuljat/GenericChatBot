@@ -36,7 +36,7 @@ CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "400"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
 
 # RAG Retrieval Configuration
-RAG_CONTEXT_SCORE_FLOOR = float(os.getenv("RAG_CONTEXT_SCORE_FLOOR", "0.4"))
+RAG_CONTEXT_SCORE_FLOOR = float(os.getenv("RAG_CONTEXT_SCORE_FLOOR", "0.35"))
 
 # Multi-Query Expansion — use LLM to generate vocabulary-variant queries
 ENABLE_QUERY_EXPANSION = os.getenv("ENABLE_QUERY_EXPANSION", "true").lower() == "true"
