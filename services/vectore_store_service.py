@@ -293,6 +293,44 @@ def search_similar(
     return chunks
 
 
+def _char_trigrams(token: str) -> set:
+    """Return the set of character trigrams for a token."""
+    if len(token) < 3:
+        return {token}
+    return {token[i:i + 3] for i in range(len(token) - 2)}
+
+
+def _fuzzy_token_recall(query_tokens: set, token_space: set, threshold: float = 0.35) -> float:
+    """
+    For each query token that has no exact match, check if any token in
+    token_space is 'close enough' via character trigram Jaccard similarity.
+    Returns the count of fuzzy-matched query tokens (for use in recall calc).
+    Only applies to tokens long enough for trigrams to be meaningful (>= 4 chars).
+    """
+    unmatched = query_tokens - token_space
+    if not unmatched:
+        return 0.0
+
+    fuzzy_matched = 0
+    for qt in unmatched:
+        if len(qt) < 4:
+            continue
+        qt_grams = _char_trigrams(qt)
+        for ct in token_space:
+            if len(ct) < 4:
+                continue
+            ct_grams = _char_trigrams(ct)
+            union = qt_grams | ct_grams
+            if not union:
+                continue
+            jaccard = len(qt_grams & ct_grams) / len(union)
+            if jaccard >= threshold:
+                fuzzy_matched += 1
+                break  # one match per query token is enough
+
+    return float(fuzzy_matched)
+
+
 def search_lexical(
     collection_name: str,
     query_text: str,
@@ -347,7 +385,9 @@ def search_lexical(
             if not token_space:
                 continue
 
-            recall = len(query_tokens & token_space) / len(query_tokens)
+            exact_matches = len(query_tokens & token_space)
+            fuzzy_matches = _fuzzy_token_recall(query_tokens, token_space)
+            recall = (exact_matches + fuzzy_matches) / len(query_tokens)
             if recall <= 0:
                 continue
 
