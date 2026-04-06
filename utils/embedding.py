@@ -631,6 +631,7 @@ def clean_text(text: str) -> str:
     text = re.sub(r'(?<!\n)\n((?:Ans|Answer)\s*[.:]\s)', r'\n\n\1', text, flags=re.IGNORECASE)
     text = re.sub(r'(?<!\n)\n(A\s*:\s)', r'\n\n\1', text)
     text = re.sub(r'(?<!\n)\n(Q(?:ue)?\s*\d+\s*[.:])', r'\n\n\1', text, flags=re.IGNORECASE)
+    text = re.sub(r'(?<!\n)\n(\d+\s*[.)]\s+\S)', r'\n\n\1', text)
 
     # ── Merged table-row recovery ─────────────────────────────────────────────
     # When PDF extractors merge tabular rows onto one line, rows that contain a
