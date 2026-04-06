@@ -510,3 +510,61 @@ def get_points_by_source_file(
     except Exception as e:
         log.error(f"Error getting points by source file: {e}")
         return []
+
+
+def fetch_chunk_by_index(
+    collection_name: str,
+    source_file: str,
+    chunk_index: int
+) -> Optional[Dict[str, Any]]:
+    """
+    Fetch a single chunk by source_file + chunk_index.
+    Used to retrieve adjacent chunks (e.g. chunk N+1 when chunk N is selected).
+    Returns None if not found.
+    """
+    try:
+        client = qdrant_manager.get_client()
+        sanitized_name = sanitize_collection_name(collection_name)
+
+        results, _ = client.scroll(
+            collection_name=sanitized_name,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(key="source_file", match=MatchValue(value=source_file)),
+                    FieldCondition(key="chunk_index", match=MatchValue(value=chunk_index)),
+                ]
+            ),
+            limit=1,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        if not results:
+            return None
+
+        payload = results[0].payload or {}
+        return {
+            "id": results[0].id,
+            "text": payload.get("text", ""),
+            "source_file": payload.get("source_file", source_file),
+            "chunk_index": payload.get("chunk_index", chunk_index),
+            "document_type": payload.get("document_type", "unknown"),
+            "score": 0.0,
+            "raw_score": 0.0,
+            "adjacent_chunk": True,
+            "retrieval_keywords": payload.get("retrieval_keywords", []),
+            "section_heading": payload.get("section_heading"),
+            "section_heading_tokens": payload.get("section_heading_tokens", []),
+            "section_labels": payload.get("section_labels", []),
+            "contains_team_members": bool(payload.get("contains_team_members")),
+            "contains_team_lead": bool(payload.get("contains_team_lead")),
+            "contains_leadership": bool(payload.get("contains_leadership")),
+            "contains_department": bool(payload.get("contains_department")),
+            "contains_core_team": bool(payload.get("contains_core_team")),
+            "contains_qa_pair": bool(payload.get("contains_qa_pair")),
+            "contains_name_role_pairs": bool(payload.get("contains_name_role_pairs")),
+            "contains_people_list": bool(payload.get("contains_people_list")),
+        }
+    except Exception as exc:
+        log.warning(f"fetch_chunk_by_index failed (non-fatal): {exc}")
+        return None
