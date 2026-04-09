@@ -3,7 +3,7 @@ import sys
 import json
 import PyPDF2
 import docx
-import google.generativeai as genai
+from openai import OpenAI
 from agent.constants import QUIZ_RENDERER_PROMPT
 import config
 from services.rag_service import generate_with_retry
@@ -12,12 +12,19 @@ from utils.logging import log
 from fastapi import HTTPException, UploadFile
 from typing import List, Dict, Any
 
-# Correct configuration Block
-genai.configure(api_key=config.GEMINI_API_KEY)
 
-
-# Correct flash model init
-model = genai.GenerativeModel(config.GEMINI_MODEL)
+def _llm_generate(prompt: str) -> str:
+    """Single-turn LLM call via LiteLLM-compatible endpoint. Returns text string."""
+    client = OpenAI(
+        base_url=config.LITE_LLM_BASE_URL,
+        api_key=config.LITE_LLM_API_KEY,
+    )
+    response = client.chat.completions.create(
+        model=config.LITE_LLM_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+    )
+    return (response.choices[0].message.content or "").strip()
 
 def extract_text_from_file(file_path: str) -> str:
     if file_path.lower().endswith(".pdf"):
@@ -43,11 +50,7 @@ def extract_from_docx(path):
 def render_questions_from_file(file_path: str):
     document_text = extract_text_from_file(file_path)
 
-    response = model.generate_content(
-        QUIZ_RENDERER_PROMPT + "\n\n" + document_text
-    )
-
-    raw = response.text.strip()
+    raw = _llm_generate(QUIZ_RENDERER_PROMPT + "\n\n" + document_text)
 
     print("RAW OUTPUT FROM MODEL:\n", raw)
 

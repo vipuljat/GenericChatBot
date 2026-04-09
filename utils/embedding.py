@@ -74,7 +74,7 @@ def estimate_embedding_cost(texts: List[str]) -> Dict[str, float]:
 # ============================================================================
 
 _openai_client: Optional[OpenAI] = None
-_use_gemini: bool = True  # Gemini-only mode; OpenAI embedding disabled
+_use_gemini: bool = True  # Gemini for embeddings (collection built with 3072-dim Gemini vectors)
 _openai_model: str = None
 _gemini_model: str = None
 _initialized: bool = False  # Track if we've actually initialized
@@ -125,7 +125,7 @@ def _ensure_initialized():
     if _initialized:
         return
 
-    # OpenAI embedding disabled — Gemini only
+    # OpenAI embedding disabled — Gemini only (collection built with 3072-dim Gemini vectors)
     # if _init_openai():
     #     _use_gemini = False
     #     _initialized = True

@@ -9,6 +9,15 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://vipul:vipul123@127.0.0.1:
 # Use a stable default model name; avoid experimental unless explicitly configured.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
+# LiteLLM / Custom LLM Proxy Configuration
+LITE_LLM_BASE_URL = os.getenv("LITE_LLM_BASE_URL")
+LITE_LLM_API_KEY = os.getenv("LITE_LLM_API_KEY", "dummy")
+LITE_LLM_MODEL = os.getenv("LITE_LLM_MODEL", GEMINI_MODEL)
+# Timeout (seconds) for auxiliary LLM calls (HyDE, query expansion)
+LITE_LLM_AUX_TIMEOUT = float(os.getenv("LITE_LLM_AUX_TIMEOUT", "8"))
+# Timeout (seconds) for the main response generation call
+LITE_LLM_MAIN_TIMEOUT = float(os.getenv("LITE_LLM_MAIN_TIMEOUT", "25"))
  
 # Microsoft Azure AD SSO Configuration
 MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID")
@@ -40,12 +49,12 @@ RAG_CONTEXT_SCORE_FLOOR = float(os.getenv("RAG_CONTEXT_SCORE_FLOOR", "0.35"))
 
 # Multi-Query Expansion — use LLM to generate vocabulary-variant queries
 ENABLE_QUERY_EXPANSION = os.getenv("ENABLE_QUERY_EXPANSION", "true").lower() == "true"
-QUERY_EXPANSION_MODEL = os.getenv("QUERY_EXPANSION_MODEL", "gemini-2.0-flash")
+QUERY_EXPANSION_MODEL = os.getenv("QUERY_EXPANSION_MODEL", LITE_LLM_MODEL)
 QUERY_EXPANSION_MAX_VARIANTS = int(os.getenv("QUERY_EXPANSION_MAX_VARIANTS", "3"))
 
 # HyDE (Hypothetical Document Embeddings) — embed a generated answer instead of the raw query
 ENABLE_HYDE = os.getenv("ENABLE_HYDE", "true").lower() == "true"
-HYDE_MODEL = os.getenv("HYDE_MODEL", "gemini-2.0-flash")
+HYDE_MODEL = os.getenv("HYDE_MODEL", LITE_LLM_MODEL)
 
 # Conversation history sent to LLM — keep only the last N messages.
 # 10 messages = 5 user+bot turns. Older turns add tokens without value for RAG.
