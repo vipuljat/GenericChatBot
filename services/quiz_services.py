@@ -6,7 +6,7 @@ Handles interactive quiz assessments with intelligent conversation flow.
 import uuid
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-import google.generativeai as genai
+from openai import OpenAI
 import config
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
@@ -17,7 +17,19 @@ import re
 # UPDATED IMPORTS - Using refactored functional services
 from services.rag_service import retrieve_context, generate_with_retry
 
-genai.configure(api_key=config.GEMINI_API_KEY)
+
+def _llm_generate(prompt: str) -> str:
+    """Single-turn LLM call via LiteLLM-compatible endpoint. Returns text string."""
+    client = OpenAI(
+        base_url=config.LITE_LLM_BASE_URL,
+        api_key=config.LITE_LLM_API_KEY,
+    )
+    response = client.chat.completions.create(
+        model=config.LITE_LLM_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+    )
+    return (response.choices[0].message.content or "").strip()
 
 
 # ============================================================================
@@ -139,9 +151,7 @@ Examples:
 "I'm done" -> end_quiz
 """
         
-        model = genai.GenerativeModel(config.GEMINI_MODEL)
-        response = model.generate_content(prompt)
-        detected_intent = response.text.strip().lower()
+        detected_intent = _llm_generate(prompt).lower()
         
         # Validate response
         valid_intents = ['clarification_question', 'skip', 'answer', 'end_quiz', 'navigate_previous', 'navigate_next']
@@ -364,11 +374,9 @@ Example responses:
 
 Now provide a helpful explanation:"""
             
-            # Generate response using Gemini
-            model = genai.GenerativeModel(config.GEMINI_MODEL)
-            response_obj = model.generate_content(prompt)
-            clarification_response = response_obj.text.strip()
-            
+            # Generate response using LiteLLM
+            clarification_response = _llm_generate(prompt)
+
             full_response = f"{clarification_response}\n\n💡 When you're ready, please provide your feedback: + (Positive), - (Scope for improvement), ± (Neutral), or frequency terms (often, sometimes, rarely, etc.)"
         
         else:
@@ -394,11 +402,9 @@ Example responses:
 
 Now provide a helpful explanation:"""
             
-            # Generate response using Gemini
+            # Generate response using LiteLLM
             try:
-                model = genai.GenerativeModel(config.GEMINI_MODEL)
-                response_obj = model.generate_content(prompt)
-                clarification_response = response_obj.text.strip()
+                clarification_response = _llm_generate(prompt)
             except Exception as e:
                 log.error(f"Error generating clarification response: {e}")
                 clarification_response = "I understand you have a question about the quiz. Could you please rephrase it, or feel free to provide your answer."
@@ -868,13 +874,11 @@ Example responses:
 
 Now respond to the employee's question:"""
                     
-                    # Generate a conversational response using Gemini
+                    # Generate a conversational response using LiteLLM
                     try:
-                        model = genai.GenerativeModel(config.GEMINI_MODEL)
-                        response_obj = model.generate_content(prompt)
-                        gemini_response = response_obj.text.strip()
+                        gemini_response = _llm_generate(prompt)
                     except Exception as e:
-                        log.error(f"Error generating Gemini response: {e}")
+                        log.error(f"Error generating LLM response: {e}")
                         gemini_response = "I understand you have a question. Could you please rephrase it, or provide your feedback using +, -, ± based on your assessment."
                     
                     response = f"{gemini_response}\n\n---\n\n{formatted_q}\n\nPlease provide your feedback: + (Positive), - (Scope for improvement), ± (Neutral), or frequency terms (always, often, sometimes, rarely, never)"

@@ -135,6 +135,21 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
                   key: FRONTEND_URL
+            - name: LITE_LLM_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: LITE_LLM_BASE_URL
+            - name: LITE_LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: LITE_LLM_API_KEY
+            - name: LITE_LLM_MODEL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-secrets-{{ .Release.Namespace }}
+                  key: LITE_LLM_MODEL
           {{- if .Values.Resources.enabled }}    
           resources:
             {{- toYaml .Values.Resources.resources | nindent 12 }}

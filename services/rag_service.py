@@ -2,8 +2,9 @@
 
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import List, Dict, Optional, Any, Tuple
-import google.generativeai as genai
+from openai import OpenAI
 import config
 from utils.logging import log
 from utils.retrieval_metadata import extract_content_tokens, normalize_match_text
@@ -13,7 +14,51 @@ from utils.embedding import generate_embedding
 from services.vectore_store_service import search_lexical, search_similar, fetch_chunk_by_index
 from utils.utilities import estimate_llm_cost
 
-genai.configure(api_key=config.GEMINI_API_KEY)
+
+class _LLMResponse:
+    """Thin wrapper so callers can use response.text regardless of backend."""
+    def __init__(self, text: str):
+        self.text = text
+
+
+def _get_llm_client() -> OpenAI:
+    return OpenAI(
+        base_url=config.LITE_LLM_BASE_URL,
+        api_key=config.LITE_LLM_API_KEY,
+    )
+
+
+def _llm_generate(prompt: str, model_name: str, timeout: float = None) -> _LLMResponse:
+    """Single-turn LLM generation via LiteLLM-compatible endpoint."""
+    client = _get_llm_client()
+    kwargs = dict(
+        model=model_name,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+    )
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    response = client.chat.completions.create(**kwargs)
+    return _LLMResponse(response.choices[0].message.content or "")
+
+
+def _llm_chat(prompt: str, model_name: str, history: list, timeout: float = None) -> _LLMResponse:
+    """Multi-turn LLM chat via LiteLLM-compatible endpoint."""
+    client = _get_llm_client()
+    system_msg = {
+        "role": "system",
+        "content": (
+            "You are a company assistant. For every turn, answer strictly from the "
+            "context and instructions provided in the current user message. "
+            "Do NOT repeat or pattern-match responses from earlier turns in this conversation."
+        ),
+    }
+    messages = [system_msg] + list(history) + [{"role": "user", "content": prompt}]
+    kwargs = dict(model=model_name, messages=messages, temperature=0)
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    response = client.chat.completions.create(**kwargs)
+    return _LLMResponse(response.choices[0].message.content or "")
 
 
 STRUCTURED_LOOKUP_HINTS = {"team", "member", "members", "lead", "leader", "manager", "head", "core", "department"}
@@ -148,8 +193,18 @@ def build_history_enriched_query(query: str, conversation_history: List[Dict[str
     return enriched
 
 
+_QUESTION_WORDS = {"how", "what", "why", "when", "where", "who", "which", "kaise", "kya", "kyun", "kab", "kahan", "kaun"}
+
 def is_terse_lookup_query(query: str) -> bool:
-    """Detect short keyword-style lookups that benefit from literal retrieval."""
+    """Detect short keyword-style lookups that benefit from literal retrieval.
+
+    Queries that begin with question words (how, what, why, etc.) are proper
+    questions and should NOT be treated as terse lookups, even if their
+    content-token count is small after stop-word removal.
+    """
+    first_word = (query or "").strip().split()[0].rstrip("?").lower() if query.strip() else ""
+    if first_word in _QUESTION_WORDS:
+        return False
     content_tokens = extract_content_tokens(query)
     if not content_tokens:
         return False
@@ -340,11 +395,7 @@ def generate_hypothetical_answer(query: str) -> Optional[str]:
     )
 
     try:
-        model = genai.GenerativeModel(
-            model_name,
-            generation_config=genai.GenerationConfig(temperature=0),
-        )
-        response = model.generate_content(prompt)
+        response = _llm_generate(prompt, model_name, timeout=config.LITE_LLM_AUX_TIMEOUT)
         hypothesis = (response.text or "").strip()
         if hypothesis:
             log.info(f"HyDE hypothesis: {hypothesis[:120]}...")
@@ -388,11 +439,7 @@ def expand_query_with_llm(query: str) -> List[str]:
     )
 
     try:
-        model = genai.GenerativeModel(
-            model_name,
-            generation_config=genai.GenerationConfig(temperature=0),
-        )
-        response = model.generate_content(prompt)
+        response = _llm_generate(prompt, model_name, timeout=config.LITE_LLM_AUX_TIMEOUT)
         raw_text = (response.text or "").strip()
         if not raw_text:
             return []
@@ -918,13 +965,15 @@ def retrieve_context(
         log.info(f"🔍 Retrieving context for: {query[:60]}...")
         query_forms = build_query_forms(query)
 
-        # Multi-query expansion: LLM generates vocabulary-variant rephrasings
-        expanded_variants = expand_query_with_llm(query)
+        # Multi-query expansion + HyDE run in parallel to reduce latency
+        with ThreadPoolExecutor(max_workers=2) as _pool:
+            _exp_future = _pool.submit(expand_query_with_llm, query)
+            _hyde_future = _pool.submit(generate_hypothetical_answer, query)
+            expanded_variants = _exp_future.result()
+            hypothesis = _hyde_future.result()
+
         if expanded_variants:
             query_forms.extend(expanded_variants)
-
-        # HyDE: generate a hypothetical answer and use its embedding for retrieval
-        hypothesis = generate_hypothetical_answer(query)
 
         log.info(f"Query forms for retrieval: {query_forms}")
 
@@ -1083,40 +1132,35 @@ def generate_with_retry(
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
-            model = genai.GenerativeModel(
-                model_name,
-                generation_config=genai.GenerationConfig(temperature=0),
-            )
-
+            main_timeout = getattr(config, "LITE_LLM_MAIN_TIMEOUT", 25)
             if conversation_history:
+                # Use OpenAI-style roles: "user" / "assistant" (not Gemini's "model")
                 history = [
                     {
-                        "role": map_role_to_gemini(msg["role"]),
-                        "parts": [msg["content"]]
+                        "role": "assistant" if msg["role"] in ("model", "assistant") else "user",
+                        "content": msg["content"],
                     }
                     for msg in conversation_history
                 ]
-                chat = model.start_chat(history=history)
-                response = chat.send_message(prompt)
+                response = _llm_chat(prompt, model_name, history, timeout=main_timeout)
             else:
-                response = model.generate_content(prompt)
-            
+                response = _llm_generate(prompt, model_name, timeout=main_timeout)
+
             # Calculate and log cost
             cost = estimate_llm_cost(prompt, response.text, model_name)
-    
-            
+
             return response
-        
+
         except Exception as e:
             last_error = e
             msg = str(e)
-            
+
             if ("429" in msg or "quota" in msg.lower() or "rate" in msg.lower()) and attempt < max_retries:
                 log.warning(f"⚠️  Rate limit (attempt {attempt}), retrying in {backoff}s")
                 time.sleep(backoff)
                 backoff *= 2
                 continue
-            
+
             break
     
     raise last_error or RuntimeError("Generation failed after retries")
