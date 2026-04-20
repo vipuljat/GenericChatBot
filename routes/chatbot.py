@@ -159,6 +159,7 @@ async def update_chatbot_endpoint(
     description: Optional[str] = Form(None),
     instruction: Optional[str] = Form(None),
     mode: Optional[str] = Form(None),
+    meta_data: Optional[str] = Form(None),  # JSON string
     questions: Optional[str] = Form(None),  # JSON string
     employee_ids: Optional[str] = Form(None),  # JSON string
     access_list: Optional[str] = Form(None),  # JSON string
@@ -176,7 +177,7 @@ async def update_chatbot_endpoint(
     parsed_employee_ids = json.loads(employee_ids) if employee_ids else None
     parsed_access_list = json.loads(access_list) if access_list else None
     parsed_deleted_documents = json.loads(deleted_documents) if deleted_documents else None
-    
+    parsed_meta_data = json.loads(meta_data) if meta_data else None
     # Handle document uploads
     doc_contents = []
     doc_names = []
@@ -197,6 +198,7 @@ async def update_chatbot_endpoint(
         questions=parsed_questions,
         employee_ids=parsed_employee_ids,
         access_list=parsed_access_list,
+        meta_data=parsed_meta_data,
         deleted_documents=parsed_deleted_documents,
         doc_contents=doc_contents if doc_contents else None,
         doc_names=doc_names if doc_names else None,
