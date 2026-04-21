@@ -519,20 +519,18 @@ def get_quiz_responses(chatbot_id: uuid.UUID, db: Session) -> Dict[str, Any]:
         .filter(Question.chatbot_id == chatbot_id, Question.status == "active")\
         .all()
 
-    # Build question map: id -> {text, options, correct_answer}
+    # Build question map keyed by 0-based array index to match stored answer keys
     question_map = {}
     for q in questions_raw:
         data_list = q.question_data
         if isinstance(data_list, list):
-            for item in data_list:
-                qid = item.get("id")
-                if qid is not None:
-                    question_map[qid] = {
-                        "text": item.get("text"),
-                        "options": item.get("options", []),
-                        "type": item.get("type", "mcq"),
-                        "correct_answer": item.get("correct_answer")
-                    }
+            for idx, item in enumerate(data_list):
+                question_map[idx] = {
+                    "text": item.get("text"),
+                    "options": item.get("options", []),
+                    "type": item.get("type", "mcq"),
+                    "correct_answer": item.get("correct_answer")
+                }
 
     # Fetch attempts
     attempts = db.query(Answer)\
