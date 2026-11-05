@@ -24,7 +24,8 @@ from services.vectore_store_service import (
     upsert_points,
     delete_collection,
     delete_points_by_source_file,
-    get_existing_source_files
+    get_existing_source_files,
+    duplicate_collection
 )
 from utils.token_decode import get_current_employee_from_token
 
@@ -491,6 +492,75 @@ def delete_chatbot_by_id(db: Session, chatbot_id: uuid.UUID) -> bool:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def duplicate_chatbot(db: Session, chatbot_id: uuid.UUID, new_name: str) -> Chatbot:
+    """
+    Duplicate a chatbot's configuration (settings, questions, permissions, access,
+    and its document collection) under a new name. Past answers / people_analyzer
+    submissions are intentionally NOT copied, so the new chatbot starts fresh.
+    """
+    try:
+        source = db.query(Chatbot).filter(Chatbot.chatbot_id == chatbot_id).first()
+        if not source:
+            raise HTTPException(status_code=404, detail="Chatbot not found")
+
+        if db.query(Chatbot).filter(Chatbot.chatbot_name == new_name).first():
+            raise HTTPException(status_code=400, detail=f"Chatbot '{new_name}' already exists")
+
+        new_chatbot = Chatbot(
+            chatbot_name=new_name,
+            description=source.description,
+            instruction=source.instruction,
+            pdf_names=source.pdf_names,
+            status=source.status,
+            mode=source.mode,
+            generated_by=source.generated_by,
+            meta_data=source.meta_data
+        )
+        db.add(new_chatbot)
+        db.commit()
+        db.refresh(new_chatbot)
+
+        # Copy questions
+        for question in db.query(Question).filter(Question.chatbot_id == chatbot_id).all():
+            db.add(Question(
+                chatbot_id=new_chatbot.chatbot_id,
+                status=question.status,
+                question_data=question.question_data
+            ))
+
+        # Copy review permissions
+        for permission in db.query(ChatbotPermission).filter(ChatbotPermission.chatbot_id == chatbot_id).all():
+            db.add(ChatbotPermission(
+                chatbot_id=new_chatbot.chatbot_id,
+                reviewer_id=permission.reviewer_id,
+                can_review_users=permission.can_review_users
+            ))
+
+        # Copy access list
+        for access in db.query(ChatbotAccess).filter(ChatbotAccess.chatbot_id == chatbot_id).all():
+            db.add(ChatbotAccess(
+                chatbot_id=new_chatbot.chatbot_id,
+                created_by=access.created_by,
+                allowed_users=access.allowed_users
+            ))
+
+        db.commit()
+
+        # Copy the document/vector collection so RAG keeps working under the new name
+        if source.pdf_names and collection_exists(source.chatbot_name):
+            duplicate_collection(source.chatbot_name, new_chatbot.chatbot_name)
+
+        log.info(f"Chatbot duplicated: '{source.chatbot_name}' -> '{new_name}' (ID: {new_chatbot.chatbot_id})")
+        return new_chatbot
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        log.error(f"Duplicate failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 def get_chatbot_responses_service(
     chatbot_id: uuid.UUID,
     department: Optional[str],
@@ -905,7 +975,7 @@ def get_employee_evaluation_service(
 # KESTREL EMPLOYEE SYNC SERVICE
 # ===================================================================
 
-async def sync_kestrel_employees_service(db: Session, page: int = 1, limit: int = 10):
+async def sync_kestrel_employees_service(db: Session, page: int = 1, limit: int = 10, only_missing: bool = False):
     """
     ✅ Uses Kestrel credentials from ENV:
     - KESTREL_BASE_URL
@@ -915,7 +985,8 @@ async def sync_kestrel_employees_service(db: Session, page: int = 1, limit: int 
     1) Call Kestrel generate-key API and get token
     2) Call Kestrel employee-list API using page & limit
     3) Compare with local Employee table using employee_code OR employee_email
-    4) If exists → update fields (employee_name, employee_email, department)
+    4) If exists → update fields (employee_name, employee_email, department),
+       unless only_missing=True, in which case existing employees are left untouched
     5) If not exists → create new employee
     """
 
@@ -1000,8 +1071,12 @@ async def sync_kestrel_employees_service(db: Session, page: int = 1, limit: int 
             elif kestrel_email and kestrel_email in db_email_map:
                 existing = db_email_map[kestrel_email]
 
-            # ✅ Step 4: update
+            # ✅ Step 4: update (skipped entirely when only_missing=True)
             if existing:
+                if only_missing:
+                    skipped_count += 1
+                    continue
+
                 changed = False
 
                 if existing.employee_name != kestrel_name:
@@ -1073,7 +1148,7 @@ async def sync_kestrel_employees_service(db: Session, page: int = 1, limit: int 
 
         return {
             "success": True,
-            "message": "Kestrel employee sync completed successfully",
+            "message": "Added only new/missing employees from Kestrel" if only_missing else "Kestrel employee sync completed successfully",
             "page": page,
             "limit": limit,
             "total_kestrel_employees_received": len(kestrel_all_employees),

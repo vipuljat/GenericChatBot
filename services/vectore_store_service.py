@@ -443,6 +443,51 @@ def delete_collection(collection_name: str) -> bool:
     return False
 
 
+def duplicate_collection(source_collection_name: str, target_collection_name: str) -> bool:
+    """Copy all points (vectors + payload) from one collection into a new one."""
+    client = qdrant_manager.get_client()
+    sanitized_source = sanitize_collection_name(source_collection_name)
+    sanitized_target = sanitize_collection_name(target_collection_name)
+
+    existing = [c.name for c in client.get_collections().collections]
+    if sanitized_source not in existing:
+        log.warning(f"Source collection not found, nothing to duplicate: {sanitized_source}")
+        return False
+
+    source_info = client.get_collection(sanitized_source)
+    vector_size = source_info.config.params.vectors.size
+
+    create_collection(target_collection_name, vector_size=vector_size, force_recreate=True)
+
+    offset = None
+    total_copied = 0
+    while True:
+        points, offset = client.scroll(
+            collection_name=sanitized_source,
+            limit=200,
+            offset=offset,
+            with_payload=True,
+            with_vectors=True,
+        )
+        if not points:
+            break
+
+        client.upsert(
+            collection_name=sanitized_target,
+            points=[
+                PointStruct(id=p.id, vector=p.vector, payload=p.payload)
+                for p in points
+            ],
+        )
+        total_copied += len(points)
+
+        if offset is None:
+            break
+
+    log.info(f"✓ Duplicated collection {sanitized_source} -> {sanitized_target} ({total_copied} points)")
+    return True
+
+
 def get_points_count(collection_name: str) -> int:
     """Get the total number of points in a collection."""
     try:

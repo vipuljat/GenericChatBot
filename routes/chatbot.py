@@ -22,7 +22,8 @@ from services.chatbots_services import (
     get_chatbot_responses_service,
     get_employee_evaluation_service,
     update_chatbot,
-    delete_chatbot_by_id
+    delete_chatbot_by_id,
+    duplicate_chatbot
 )
 from services.rag_service import generate_rag_response
 from services.quiz_services import quiz_query_service
@@ -60,6 +61,10 @@ class SubmitQuizRequest(BaseModel):
     answers: Dict[str, Any] = {}
     employee_id: Optional[str] = None
     user_id: Optional[str] = None
+
+
+class DuplicateChatbotRequest(BaseModel):
+    new_name: str
 
 
 
@@ -229,6 +234,29 @@ async def delete_chatbot_endpoint(
         }
     
     raise HTTPException(status_code=500, detail="Delete failed")
+
+
+@router.post("/{chatbot_id}/duplicate", summary="Duplicate chatbot")
+async def duplicate_chatbot_endpoint(
+    chatbot_id: str,
+    payload: DuplicateChatbotRequest,
+    db: Session = Depends(get_db)
+):
+    """Duplicate a chatbot's configuration (settings, questions, permissions, access,
+    documents) under a new name. Past answers/submissions are not copied."""
+
+    chatbot = duplicate_chatbot(
+        db=db,
+        chatbot_id=uuid.UUID(chatbot_id),
+        new_name=payload.new_name
+    )
+
+    return {
+        "chatbot_id": str(chatbot.chatbot_id),
+        "chatbot_name": chatbot.chatbot_name,
+        "status": chatbot.status,
+        "message": "Duplicated successfully"
+    }
 
 
 @router.get("/list", summary="List chatbots")
@@ -735,11 +763,13 @@ async def sync_kestrel_employees(
     request: Request,
     page: int = Query(1, ge=1),
     limit: int = Query(10, ge=1, le=1000),
+    only_missing: bool = Query(False, description="If true, only add employees not already in the DB; existing employees are left untouched (not updated)."),
     db: Session = Depends(get_db),
 ):
     """
     Frontend refresh trigger hits this API.
     It syncs Kestrel employees (page+limit) with your local Employee table.
+    Pass only_missing=true to add only the employees we don't already have, without updating existing ones.
     """
-    return await sync_kestrel_employees_service(db=db, page=page, limit=limit)
+    return await sync_kestrel_employees_service(db=db, page=page, limit=limit, only_missing=only_missing)
 
