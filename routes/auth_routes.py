@@ -105,6 +105,11 @@ async def auth_callback(
         # Check if employee exists
         employee = db.query(Employee).filter(Employee.employee_email == employee_email).first()
 
+        # Soft-deleted (or draft) users must not get back in; a new row can't be created
+        # for this email anyway because employee_email is unique.
+        if employee and employee.status != "active":
+            raise HTTPException(status_code=403, detail="Account is not active")
+
         is_first_user = False
         if not employee:
             # First user ever becomes admin; all subsequent users are employees
@@ -192,7 +197,10 @@ async def get_current_employee(request: Request, db: Session = Depends(get_db)):
 
     # Get employee from database
     microsoft_id = payload.get("sub")  # JWT 'sub' field contains Microsoft ID
-    employee = db.query(Employee).filter(Employee.employee_id == microsoft_id).first()
+    employee = db.query(Employee).filter(
+        Employee.employee_id == microsoft_id,
+        Employee.status == "active",
+    ).first()
 
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")

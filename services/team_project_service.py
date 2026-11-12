@@ -154,7 +154,9 @@ def export_assignments(db: Session) -> BytesIO:
     Returns a BytesIO object ready for streaming.
     """
     # Load all employees
-    employees = db.query(Employee).order_by(Employee.employee_name.asc()).all()
+    employees = db.query(Employee).filter(
+        Employee.status != "deleted"
+    ).order_by(Employee.employee_name.asc()).all()
 
     # Load all mappings joined with team/project info in one query
     rows = (
@@ -231,7 +233,7 @@ def import_assignments(db: Session, file_bytes: bytes) -> dict:
     # Pre-load email -> UUID map for employees
     email_to_id = {
         e.employee_email.strip().lower(): str(e.id)
-        for e in db.query(Employee).all()
+        for e in db.query(Employee).filter(Employee.status != "deleted").all()
         if e.employee_email
     }
 

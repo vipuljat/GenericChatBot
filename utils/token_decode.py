@@ -31,7 +31,8 @@ def get_current_employee_from_token(request: Request, db: Session) -> Employee:
             raise HTTPException(status_code=401, detail="Invalid token payload")
 
         employee = db.query(Employee).filter(
-            Employee.employee_email == email
+            Employee.employee_email == email,
+            Employee.status == "active",
         ).first()
 
         if not employee:

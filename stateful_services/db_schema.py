@@ -19,6 +19,9 @@ class Employee(Base):
     employee_role = Column(String, nullable=False)
     department = Column(String, nullable=True)
     meta_data = Column(JSONB, nullable=True)  # changed to JSONB
+    # Lifecycle: "active" (can log in, shown everywhere), "draft" (not active yet),
+    # "deleted" (soft-deleted; hidden from lists and cannot log in)
+    status = Column(String, nullable=False, default="active", server_default="active")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

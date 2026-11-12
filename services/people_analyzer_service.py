@@ -137,7 +137,8 @@ def get_employees_service(
 
         # 🔑 START FROM PERMISSION SCOPE
         query = db.query(Employee).filter(
-            Employee.id.in_(permission.can_review_users)
+            Employee.id.in_(permission.can_review_users),
+            Employee.status != "deleted",
         )
 
         log.info(
@@ -163,7 +164,7 @@ def get_employees_service(
 
     else:
         # ---------- Normal Mode ----------
-        query = db.query(Employee)
+        query = db.query(Employee).filter(Employee.status != "deleted")
 
     # ---------- Apply UI Filters ----------
     if department:

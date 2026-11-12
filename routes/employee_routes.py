@@ -48,7 +48,7 @@ def list_employees(
 
     # require_admin(request, db)
 
-    query = db.query(Employee)
+    query = db.query(Employee).filter(Employee.status != "deleted")
     if role:
         query = query.filter(Employee.employee_role == role)
     if department:
@@ -72,7 +72,10 @@ def get_employee(
 
     # require_admin(request, db)
 
-    employee = db.query(Employee).filter(Employee.id == employee_id).first()
+    employee = db.query(Employee).filter(
+        Employee.id == employee_id,
+        Employee.status != "deleted",
+    ).first()
 
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
@@ -112,7 +115,8 @@ def update_employee_role(
 
     # FIX: compare by PK (Employee.id) because employee_id path param is a UUID
     employee = db.query(Employee).filter(
-        Employee.id == employee_id
+        Employee.id == employee_id,
+        Employee.status != "deleted",
     ).first()
 
     if not employee:
@@ -165,7 +169,10 @@ def update_employee(
 
     admin = require_admin(request, db)
 
-    employee = db.query(Employee).filter(Employee.id == employee_id).first()
+    employee = db.query(Employee).filter(
+        Employee.id == employee_id,
+        Employee.status != "deleted",
+    ).first()
 
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
@@ -225,63 +232,64 @@ def update_employee(
     }
 
 
-@router.delete("/{employee_id}")
-def delete_employee(
+class BulkDeleteEmployeesRequest(BaseModel):
+    employee_ids: list[uuid.UUID]
+
+
+@router.post("/bulk-delete", summary="Soft-delete multiple employees (admin only)")
+def bulk_delete_employees(
     request: Request,
-    employee_id: uuid.UUID,
+    payload: BulkDeleteEmployeesRequest,
     db: Session = Depends(get_db)
 ):
     """
-    Delete an employee (admin only).
-    """
+    Soft-delete several employees at once (admin only).
 
+    Sets status = "deleted" for each id; rows are kept so history stays intact.
+    Ids that are unknown or already deleted are reported, not treated as errors.
+    The request is rejected if it includes the admin's own id.
+
+    Response: { deleted_count, deleted_ids, already_deleted_ids, not_found_ids }
+    """
     admin = require_admin(request, db)
 
-    employee = db.query(Employee).filter(Employee.id == employee_id).first()
+    # Deduplicate while keeping the order the client sent
+    ids = list(dict.fromkeys(payload.employee_ids))
 
-    if not employee:
-        raise HTTPException(status_code=404, detail="Employee not found")
+    if not ids:
+        raise HTTPException(status_code=400, detail="employee_ids must not be empty")
 
-    # Prevent admins from deleting themselves
-    if admin.id == employee.id:
+    if admin.id in ids:
         raise HTTPException(
             status_code=400,
             detail="You cannot delete your own account"
         )
 
-    employee_name = employee.employee_name
-    employee_email = employee.employee_email
-    employee_id_str = str(employee_id)
+    employees = db.query(Employee).filter(Employee.id.in_(ids)).all()
+    by_id = {emp.id: emp for emp in employees}
 
-    # Clean up chatbot permissions where this employee is a reviewer
-    # The FK has ondelete="SET NULL" so reviewer_id becomes NULL, we delete those orphaned records
-    db.query(ChatbotPermission).filter(
-        ChatbotPermission.reviewer_id == employee_id
-    ).delete()
-    
-    # Clean up any references in can_review_users JSONB arrays
-    all_permissions = db.query(ChatbotPermission).all()
-    for perm in all_permissions:
-        if perm.can_review_users and employee_id_str in perm.can_review_users:
-            perm.can_review_users = [uid for uid in perm.can_review_users if uid != employee_id_str]
-    
-    # Clean up any references in ChatbotAccess allowed_users JSONB arrays
-    all_access = db.query(ChatbotAccess).all()
-    for access in all_access:
-        if access.allowed_users and employee_id_str in access.allowed_users:
-            access.allowed_users = [uid for uid in access.allowed_users if uid != employee_id_str]
+    deleted_ids, already_deleted_ids, not_found_ids = [], [], []
 
-    db.delete(employee)
+    for emp_id in ids:
+        emp = by_id.get(emp_id)
+        if emp is None:
+            not_found_ids.append(str(emp_id))
+        elif emp.status == "deleted":
+            already_deleted_ids.append(str(emp_id))
+        else:
+            emp.status = "deleted"
+            deleted_ids.append(str(emp_id))
+
     db.commit()
+
+    log.info(f"Bulk soft-delete by {admin.employee_email}: {len(deleted_ids)} deleted")
 
     return {
         "status": "success",
-        "message": f"Employee '{employee_name}' deleted successfully",
-        "deleted_employee": {
-            "id": str(employee_id),
-            "employee_name": employee_name,
-            "employee_email": employee_email,
-        },
+        "deleted_count": len(deleted_ids),
+        "deleted_ids": deleted_ids,
+        "already_deleted_ids": already_deleted_ids,
+        "not_found_ids": not_found_ids,
         "deleted_by": {
             "id": str(admin.id),
             "name": admin.employee_name,
@@ -388,7 +396,8 @@ def update_employee_service(
 
     try:
         employee = db.query(Employee).filter(
-            Employee.id == employee_id
+            Employee.id == employee_id,
+            Employee.status != "deleted",
         ).first()
 
         if not employee:
@@ -562,7 +571,9 @@ _ALLOWED_ROLES  = ["employee", "admin", "manager", "hr"]
 @router.get("/export", summary="Export all employees as Excel")
 def export_employees(db: Session = Depends(get_db)):
     """Download an Excel file with all employees. Use it as an import template too."""
-    employees = db.query(Employee).order_by(Employee.employee_name.asc()).all()
+    employees = db.query(Employee).filter(
+        Employee.status != "deleted"
+    ).order_by(Employee.employee_name.asc()).all()
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -667,6 +678,8 @@ async def import_employees(
         if existing:
             existing.employee_name = name
             existing.employee_role = role
+            # Re-importing a soft-deleted user restores them (email is unique, so we can't create a new row)
+            existing.status = "active"
             if dept is not None:
                 existing.department = dept
             if code is not None:
