@@ -16,9 +16,8 @@ from services.team_project_service import (
     delete_team_project,
     get_assignments,
     bulk_assign,
-    export_assignments,
-    import_assignments,
 )
+from services.employee_assignment_io import export_employees_workbook, import_employees_workbook
 
 router = APIRouter(tags=["Team & Project Config"])
 
@@ -86,10 +85,11 @@ def get_assignments_route(
 
 
 # ---- Excel Import / Export ----
+# Same file format and logic as Manage Users (services/employee_assignment_io.py)
 
 @router.get("/assignments/export")
 def export_assignments_route(db: Session = Depends(get_db)):
-    buffer = export_assignments(db)
+    buffer = export_employees_workbook(db)
     return StreamingResponse(
         buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -104,5 +104,5 @@ async def import_assignments_route(
 ):
     if not file.filename.endswith((".xlsx", ".xls")):
         raise HTTPException(status_code=400, detail="Only .xlsx / .xls files are accepted")
-    file_bytes = await file.read()
-    return import_assignments(db, file_bytes)
+    # Team Config only assigns existing employees; it never creates or reactivates them
+    return import_employees_workbook(db, await file.read(), create_missing=False)
